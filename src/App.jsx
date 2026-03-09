@@ -148,7 +148,9 @@ function App() {
     return (
       <div className="min-h-screen bg-stone-50 p-6 flex flex-col justify-center max-w-xl mx-auto">
         <div className="mb-8 text-center flex flex-col items-center">
-          <div className="w-20 h-20 bg-red-100 text-red-600 rounded-full flex items-center justify-center mb-4"><Truck size={40}/></div>
+          {/* Aquí llamamos a tu logo.png directamente desde la carpeta public */}
+          <img src="/logo.png" alt="Logo Full Canapé" className="w-32 h-auto mb-4 drop-shadow-md" />
+          
           <h1 className="text-3xl font-black text-stone-900 tracking-tight">Full Despachos</h1>
           <p className="text-stone-500 font-medium mt-2">Pega la lista de WhatsApp para comenzar</p>
         </div>
