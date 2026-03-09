@@ -1,9 +1,11 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// ⚠️ SEGURIDAD: Esta API Key debería estar en un archivo .env, no hardcodeada.
-const genAI = new GoogleGenerativeAI("AIzaSyCfYSvl5U8Dd5Q8PfXwHal2tc_bR5rqRGg");
+// Ahora lee la llave desde el archivo .env seguro
+const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
+const genAI = new GoogleGenerativeAI(apiKey);
 
 export async function procesarPedidos(textoWhatsApp) {
+// ... el resto de tu código queda exactamente igual
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" }); // Usamos flash para máxima velocidad
 
   const prompt = `
