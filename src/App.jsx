@@ -25,7 +25,7 @@ function App() {
   
   const pressTimer = useRef(null);
 
-  // Guardar cambios en LocalStorage automáticamente
+  // Guardar cambios en LocalStorage automáticamente.
   useEffect(() => {
     localStorage.setItem('fc_input', JSON.stringify(input));
     localStorage.setItem('fc_pedidos', JSON.stringify(pedidos));
