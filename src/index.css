@@ -1,1 +1,85 @@
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@500;700;900&display=swap');
 @import "tailwindcss";
+
+@layer base {
+  *, *::before, *::after {
+    font-family: 'Montserrat', system-ui, sans-serif;
+  }
+  body {
+    background-color: #f5f5f4;
+  }
+  * {
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+@layer components {
+  /* Sombra premium multicapa para tarjetas */
+  .shadow-card {
+    box-shadow:
+      0 1px 2px rgba(0,0,0,0.04),
+      0 4px 8px rgba(0,0,0,0.06),
+      0 12px 24px rgba(0,0,0,0.08),
+      0 0 0 1px rgba(0,0,0,0.03);
+  }
+  
+  /* Sombra para botones CTA */
+  .shadow-cta {
+    box-shadow:
+      0 2px 4px rgba(220,38,38,0.2),
+      0 8px 20px rgba(220,38,38,0.3),
+      0 0 0 1px rgba(220,38,38,0.1);
+  }
+  
+  /* Sombra para botones oscuros */
+  .shadow-dark {
+    box-shadow:
+      0 2px 4px rgba(0,0,0,0.15),
+      0 8px 20px rgba(0,0,0,0.2),
+      0 0 0 1px rgba(0,0,0,0.08);
+  }
+
+  /* Sombra para botones WhatsApp */
+  .shadow-wa {
+    box-shadow:
+      0 2px 4px rgba(37,211,102,0.2),
+      0 6px 14px rgba(37,211,102,0.25);
+  }
+
+  /* Borde superior de tarjeta principal */
+  .card-accent-top {
+    border-top: 5px solid #dc2626;
+  }
+}
+
+@layer utilities {
+  .animate-slide-up {
+    animation: slideUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+  .animate-pop-in {
+    animation: popIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
+  }
+}
+
+/* Animaciones personalizadas */
+@keyframes slideUp {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes popIn {
+  from { opacity: 0; transform: scale(0.92); }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* Detalles de UI Custom */
+input[type="checkbox"] { cursor: pointer; }
+
+button:focus-visible, input:focus-visible, label:focus-visible {
+  outline: 3px solid #dc2626;
+  outline-offset: 2px;
+}
+
+::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #d6d3d1; border-radius: 99px; }
