@@ -51,8 +51,14 @@ function App() {
 // --- LÓGICA DE SINCRONIZACIÓN EN LA NUBE ---
   const sincronizarConNube = async () => {
     if (pedidos.length === 0) return;
+    
+    if (!supabase) {
+      console.error("❌ SUPABASE APAGADO: Vite no está leyendo tu archivo .env");
+      return;
+    }
+
     try {
-      await supabase.from('monitoreo_rutas').upsert({
+      const { data, error } = await supabase.from('monitoreo_rutas').upsert({
         id: sessionId,
         nombre_repartidor: "Repartidor " + sessionId.substring(0,3).toUpperCase(),
         progreso_actual: index,
@@ -61,7 +67,15 @@ function App() {
         ultima_actualizacion: new Date().toISOString(),
         esta_activo: modo !== 'fin'
       });
-    } catch (e) { console.log("Operando sin conexión a la nube."); }
+
+      if (error) {
+        console.error("❌ ERROR DE SUPABASE RECHAZANDO EL DATO:", error.message, error.details);
+      } else {
+        console.log("✅ DATO ENVIADO A LA NUBE CON ÉXITO");
+      }
+    } catch (e) { 
+      console.error("❌ Error de red intentando conectar a la nube:", e); 
+    }
   };
 
   useEffect(() => {
@@ -377,19 +391,21 @@ function App() {
 
   if (pedidos.length === 0) {
     return (
-      <div className="min-h-screen bg-stone-50 flex flex-col justify-center p-6 max-w-xl mx-auto overflow-y-auto">
-        {/* BOTÓN FANTASMA ADMIN */}
+      <div className="min-h-screen bg-stone-50 flex flex-col justify-center p-6 max-w-xl mx-auto overflow-y-auto relative">
+        {/* BOTÓN FANTASMA ADMIN: Ahora es una Hitbox gigante transparente de 128x128px en la esquina */}
         <button
           onPointerDown={startAdmin}
           onPointerUp={stopAdmin}
           onPointerLeave={stopAdmin}
-          className="absolute top-4 right-4 text-stone-200 hover:text-stone-300 transition-colors cursor-pointer"
-          style={{ WebkitUserSelect: 'none' }}
+          className="absolute top-0 right-0 w-32 h-32 flex items-start justify-end p-6 cursor-pointer opacity-100"
+          style={{ WebkitUserSelect: 'none', touchAction: 'none' }}
         >
-          <Zap size={20} />
-          <div className="absolute top-6 right-0 h-1 bg-red-500 transition-all rounded-full" style={{ width: `${adminProgress}%` }} />
+          <div className="relative">
+            <Zap size={24} className="text-stone-300" />
+            <div className="absolute top-8 right-0 h-1 bg-red-500 transition-all rounded-full" style={{ width: `${adminProgress}%` }} />
+          </div>
         </button>
-        <div className="mb-10 text-center flex flex-col items-center animate-slide-up">
+        <div className="mb-10 text-center flex flex-col items-center animate-slide-up mt-10">
           {/* 🖼️ Aquí volvió el logo de Full Canapé */}
           <img src="/logo.png" alt="Logo Full Canapé" className="w-32 h-auto mb-5 drop-shadow-md" />
           <h1 className="text-4xl font-black text-stone-900 tracking-tight leading-none">Full Canapé</h1>
