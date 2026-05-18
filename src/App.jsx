@@ -4,7 +4,7 @@ import { supabase } from './lib/supabase';
 import { 
   ChevronLeft, ChevronRight, Package, MapPin, Loader2, CheckCircle2, 
   Map, Zap, Truck, Home, Phone, MessageCircle, RefreshCcw, ListOrdered, 
-  X, ArrowUp, ArrowDown 
+  X, ArrowUp, ArrowDown, AlertTriangle, Pencil, Save 
 } from 'lucide-react';
 
 const getMemoria = (clave, valorPorDefecto) => {
@@ -29,6 +29,18 @@ function App() {
   const [showReorder, setShowReorder] = useState(false);
   const [resetProgress, setResetProgress] = useState(0);
 
+  // ESTADO FASE 1: Alerta del Check-in
+  const [alertaSinTelefono, setAlertaSinTelefono] = useState(null);
+
+  // --- ESTADOS FASE 2: MODO LÁPIZ ---
+  const [modoEdicion, setModoEdicion] = useState(false);
+  const [formEdicion, setFormEdicion] = useState({ cliente: '', telefono: '', direccion: '' });
+  const [editProgress, setEditProgress] = useState(0);
+  const editTimer = useRef(null);
+
+  // --- ESTADO FASE 3: ANIMACIÓN MODO SPOTIFY ---
+  const [animatingMover, setAnimatingMover] = useState(null);
+
   const pressTimer  = useRef(null);
   const resetTimer  = useRef(null);
 
@@ -48,7 +60,7 @@ function App() {
     localStorage.setItem('fc_eta',      JSON.stringify(eta));
   }, [input, pedidos, historial, index, modo, eta]);
 
-// --- LÓGICA DE SINCRONIZACIÓN EN LA NUBE ---
+  // --- LÓGICA DE SINCRONIZACIÓN EN LA NUBE ---
   const sincronizarConNube = async () => {
     if (pedidos.length === 0) return;
     
@@ -84,12 +96,19 @@ function App() {
 
   // --- LÓGICA DEL MODO DIOS (ADMIN) ---
   const cargarRutasEnVivo = async () => {
-    try {
-      const { data } = await supabase.from('monitoreo_rutas')
-        .select('*').eq('esta_activo', true).order('ultima_actualizacion', { ascending: false });
-      if (data) setRutasEnVivo(data);
-    } catch(e) {}
-  };
+  try {
+    // Quitamos el filtro para ver si así llegan los datos
+    const { data, error } = await supabase.from('monitoreo_rutas')
+      .select('*')
+      .order('ultima_actualizacion', { ascending: false });
+    
+    if (error) console.error("Error en lectura:", error);
+    if (data) {
+      console.log("Datos recibidos por el admin:", data);
+      setRutasEnVivo(data);
+    }
+  } catch(e) { console.error(e); }
+};
 
   const startAdmin = () => {
     adminTimer.current = setInterval(() => {
@@ -112,11 +131,11 @@ function App() {
       const data = await procesarPedidos(input);
       const preparar = (ruta) => ruta.map(p => ({
         ...p,
+        id: Math.random().toString(36).substring(2, 9), // 🪪 Carnet de Identidad oculto para que no se maree la UI
         items: p.items.map(i => ({ nombre: i, marcado: false, sacado: false }))
       }));
       if (data.pedidos && data.pedidos.length > 0) {
         const nuevosPedidos = preparar(data.pedidos);
-        // Ahora guardamos el respaldo SIEMPRE que se procese una ruta nueva
         setHistorial(nuevosPedidos); 
         setPedidos(nuevosPedidos);
         setIndex(0);
@@ -133,7 +152,6 @@ function App() {
 
   const restaurarUltima = () => {
     if (historial && historial.length > 0) {
-      // Clona el historial para no afectar el respaldo original al interactuar con las cajas
       setPedidos(JSON.parse(JSON.stringify(historial))); 
       setIndex(0);
       setModo('carga');
@@ -155,11 +173,69 @@ function App() {
     setPedidos([]); setInput(""); setIndex(0); setModo('carga'); setEta("");
   };
 
+  // --- LÓGICA MODO SPOTIFY (FASE 3 - CORREGIDA) ---
   const moverPedido = (from, to) => {
     const nuevos = [...pedidos];
     const [removido] = nuevos.splice(from, 1);
     nuevos.splice(to, 0, removido);
     setPedidos(nuevos);
+  };
+
+  const moverPedidoConAnimacion = (from, to) => {
+    if (animatingMover) return;
+    setAnimatingMover({ from, to });
+    
+    setTimeout(() => {
+      moverPedido(from, to);
+      setAnimatingMover(null); // Al borrar esto, el CSS se apaga justo cuando la tarjeta cae en su nueva posición física
+    }, 300);
+  };
+
+  // --- NUEVAS FUNCIONES OPERATIVAS (FASE 1) ---
+  const pedirTelefonoAdmin = () => {
+    const numAdmin = "56988589058";
+    const msj = `Necesito el número de teléfono de ${pedidoActual.direccion}`;
+    window.open(`https://wa.me/${numAdmin}?text=${encodeURIComponent(msj)}`, '_blank');
+  };
+
+  const intentarComenzarRuta = () => {
+    const faltan = pedidos.map((p, i) => ({ ...p, numOriginal: i + 1 })).filter(p => !p.telefono);
+    if (faltan.length > 0) {
+      setAlertaSinTelefono(faltan[0]);
+    } else {
+      cambiarAModoReparto();
+    }
+  };
+
+  // --- NUEVAS FUNCIONES FASE 2: MODO LÁPIZ ---
+  const startEditPress = () => {
+    editTimer.current = setInterval(() => {
+      setEditProgress(prev => {
+        if (prev >= 100) {
+          clearInterval(editTimer.current);
+          setFormEdicion({ 
+            cliente: pedidos[index]?.cliente || '', 
+            telefono: pedidos[index]?.telefono || '', 
+            direccion: pedidos[index]?.direccion || '' 
+          });
+          setModoEdicion(true);
+          return 0;
+        }
+        return prev + 5;
+      });
+    }, 40);
+  };
+  
+  const stopEditPress = () => {
+    clearInterval(editTimer.current);
+    setEditProgress(0);
+  };
+
+  const guardarEdicion = () => {
+    const nuevos = [...pedidos];
+    nuevos[index] = { ...nuevos[index], ...formEdicion };
+    setPedidos(nuevos);
+    setModoEdicion(false);
   };
 
   const enviarAvisoCliente = () => {
@@ -182,7 +258,6 @@ function App() {
     window.open(`https://wa.me/${numAdmin}?text=${encodeURIComponent(msj)}`, '_blank');
   };
 
-  // 🗺️ Enlace oficial y corregido de Google Maps
   const abrirMapa = (dir) => window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(dir)}`, '_blank');
   
   const finalizarRuta = () => { setAbsorbiendo(true); setTimeout(() => { setModo('fin'); setAbsorbiendo(false); }, 800); };
@@ -233,7 +308,7 @@ function App() {
     <div className="pt-5 border-t border-stone-100 bg-white w-full">
       {modo === 'carga' ? (
         <button
-          onClick={cambiarAModoReparto}
+          onClick={intentarComenzarRuta}
           disabled={!todoCargado}
           aria-label={todoCargado ? 'Comenzar ruta' : 'Faltan cajas por marcar'}
           className={`
@@ -289,7 +364,7 @@ function App() {
           ) : (
             rutasEnVivo.map(ruta => {
               const porcentaje = Math.round((ruta.progreso_actual / ruta.total_pedidos) * 100) || 0;
-              const pedidoActual = ruta.pedidos_json[ruta.progreso_actual] || ruta.pedidos_json[ruta.pedidos_json.length - 1];
+              const pedidoActualInfo = ruta.pedidos_json[ruta.progreso_actual] || ruta.pedidos_json[ruta.pedidos_json.length - 1];
               
               return (
                 <div key={ruta.id} className="bg-stone-900 border-2 border-white/5 p-6 rounded-3xl shadow-2xl">
@@ -308,7 +383,7 @@ function App() {
                     <MapPin size={14} className="text-red-500 mt-0.5 shrink-0" />
                     <div>
                       <p className="text-xs text-stone-500 font-black uppercase tracking-widest">Entregando ahora:</p>
-                      <p className="text-sm font-bold text-stone-300 leading-snug truncate">{pedidoActual?.direccion || 'Ruta finalizada'}</p>
+                      <p className="text-sm font-bold text-stone-300 leading-snug truncate">{pedidoActualInfo?.direccion || 'Ruta finalizada'}</p>
                     </div>
                   </div>
                 </div>
@@ -323,7 +398,6 @@ function App() {
   if (modo === 'fin') {
     return (
       <div className="min-h-screen bg-white flex flex-col items-center justify-center p-8 text-stone-900 overflow-hidden relative">
-        {/* Estilos para animaciones exclusivas de la pantalla final */}
         <style>{`
           @keyframes truck-cross { 
             0% { transform: translateX(-150px); } 
@@ -335,7 +409,6 @@ function App() {
           }
         `}</style>
 
-        {/* Confetti dinámico cayendo */}
         {[...Array(50)].map((_, i) => (
           <div
             key={i}
@@ -358,7 +431,6 @@ function App() {
           <h1 className="text-5xl font-black mb-1 tracking-tight">¡RUTA</h1>
           <h1 className="text-5xl font-black tracking-tight text-red-600 mb-8">COMPLETADA!</h1>
           
-          {/* El Camión cruzando la pantalla */}
           <div className="w-full relative h-24 mb-10 flex items-center justify-center">
             <div className="absolute bottom-6 left-0 w-full h-0 border-t-4 border-dashed border-stone-200"></div>
             <div className="absolute bottom-[20px] left-0 flex items-center animate-[truck-cross_4s_infinite_linear] w-full">
@@ -366,10 +438,7 @@ function App() {
             </div>
           </div>
 
-          {/* Botones de acción final */}
           <div className="flex flex-col gap-4 w-full">
-            
-            {/* CORRECCIÓN PWA: Convertido de <button> a enlace <a> nativo */}
             <a
               href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent("fundo el bosque 95, maipú")}`}
               className="bg-emerald-500 text-white h-[68px] rounded-3xl w-full font-black text-base sm:text-lg active:scale-[0.97] transition-all flex items-center justify-center gap-3 shadow-[0_4px_12px_rgba(16,185,129,0.3),0_8px_24px_rgba(16,185,129,0.2)] cursor-pointer tracking-wider"
@@ -392,7 +461,6 @@ function App() {
   if (pedidos.length === 0) {
     return (
       <div className="min-h-screen bg-stone-50 flex flex-col justify-center p-6 max-w-xl mx-auto overflow-y-auto relative">
-        {/* BOTÓN FANTASMA ADMIN: Ahora es una Hitbox gigante transparente de 128x128px en la esquina */}
         <button
           onPointerDown={startAdmin}
           onPointerUp={stopAdmin}
@@ -406,7 +474,6 @@ function App() {
           </div>
         </button>
         <div className="mb-10 text-center flex flex-col items-center animate-slide-up mt-10">
-          {/* 🖼️ Aquí volvió el logo de Full Canapé */}
           <img src="/logo.png" alt="Logo Full Canapé" className="w-32 h-auto mb-5 drop-shadow-md" />
           <h1 className="text-4xl font-black text-stone-900 tracking-tight leading-none">Full Canapé</h1>
           <p className="text-stone-400 font-semibold mt-2 text-sm tracking-wider uppercase">Sistema logístico de ruta</p>
@@ -417,12 +484,7 @@ function App() {
             Pegar pedidos aquí
           </label>
           <textarea
-            className="
-              w-full h-52 p-5 bg-white rounded-3xl border-2 border-stone-200 mb-5
-              outline-none text-base resize-none font-medium text-stone-800
-              placeholder:text-stone-300 placeholder:font-normal
-              focus:border-red-500 transition-colors duration-200 shadow-card
-            "
+            className="w-full h-52 p-5 bg-white rounded-3xl border-2 border-stone-200 mb-5 outline-none text-base resize-none font-medium text-stone-800 placeholder:text-stone-300 placeholder:font-normal focus:border-red-500 transition-colors duration-200 shadow-card"
             placeholder="Pega los pedidos aquí..."
             value={input}
             onChange={(e) => setInput(e.target.value)}
@@ -433,17 +495,9 @@ function App() {
           <button
             onClick={handleProcesar}
             disabled={cargando || !input.trim()}
-            className={`
-              h-[68px] rounded-3xl font-black text-base transition-all duration-200 cursor-pointer
-              flex items-center justify-center gap-3
-              ${cargando || !input.trim()
-                ? 'bg-stone-300 text-stone-500 cursor-not-allowed'
-                : 'bg-red-600 text-white shadow-cta active:scale-[0.97]'}
-            `}
+            className={`h-[68px] rounded-3xl font-black text-base transition-all duration-200 cursor-pointer flex items-center justify-center gap-3 ${cargando || !input.trim() ? 'bg-stone-300 text-stone-500 cursor-not-allowed' : 'bg-red-600 text-white shadow-cta active:scale-[0.97]'}`}
           >
-            {cargando
-              ? <><Loader2 className="animate-spin" size={22} /> PROCESANDO...</>
-              : <><Package size={22} /> CARGAR RUTA</>}
+            {cargando ? <><Loader2 className="animate-spin" size={22} /> PROCESANDO...</> : <><Package size={22} /> CARGAR RUTA</>}
           </button>
 
           {historial && (
@@ -463,12 +517,43 @@ function App() {
 
   return (
     <div className="min-h-screen bg-stone-100 p-4 sm:p-6 flex flex-col relative max-w-7xl mx-auto">
-      <div
-        className={`fixed inset-0 bg-white z-100 transition-all duration-700 pointer-events-none ${
-          absorbiendo ? 'opacity-100 scale-150 rounded-none' : 'opacity-0 scale-0 rounded-full'
-        }`}
-        style={{ transformOrigin: 'bottom center' }}
-      />
+      {/* CSS GLOBAL PARA EL JIGGLE MODE (MODO IOS) */}
+      <style>{`
+        @keyframes jiggle {
+          0% { transform: rotate(-1deg); }
+          50% { transform: rotate(1deg); }
+          100% { transform: rotate(-1deg); }
+        }
+        .animate-jiggle {
+          animation: jiggle 0.25s infinite ease-in-out;
+        }
+      `}</style>
+
+      <div className={`fixed inset-0 bg-white z-[100] transition-all duration-700 pointer-events-none ${absorbiendo ? 'opacity-100 scale-150 rounded-none' : 'opacity-0 scale-0 rounded-full'}`} style={{ transformOrigin: 'bottom center' }} />
+
+      {/* MODAL DE ALERTA DE TELÉFONO (CHECK-IN) */}
+      {alertaSinTelefono && (
+        <div className="fixed inset-0 bg-stone-950/80 z-[300] flex items-center justify-center p-6 animate-pop-in">
+          <div className="bg-white rounded-[2rem] p-8 max-w-sm w-full shadow-2xl flex flex-col items-center text-center">
+            <div className="bg-amber-100 text-amber-600 p-4 rounded-full w-20 h-20 flex items-center justify-center mb-6">
+              <AlertTriangle size={36} strokeWidth={2.5} />
+            </div>
+            <h3 className="text-3xl font-black text-stone-900 mb-3 leading-tight tracking-tight">Ten cuidado</h3>
+            <p className="text-stone-500 font-medium mb-8 leading-relaxed">
+              Al pedido de la dirección <strong className="text-stone-900">{alertaSinTelefono.direccion}</strong> correspondiente a la parada <strong className="text-red-500">#{alertaSinTelefono.numOriginal}</strong> le falta el número de teléfono.
+            </p>
+            <button
+              onClick={() => {
+                setAlertaSinTelefono(null);
+                cambiarAModoReparto();
+              }}
+              className="w-full bg-stone-900 text-white h-[68px] rounded-3xl font-black text-base active:scale-[0.97] transition-transform shadow-dark cursor-pointer tracking-wider"
+            >
+              CONTINUAR DE TODAS FORMAS
+            </button>
+          </div>
+        </div>
+      )}
 
       <div className="flex justify-between items-center mb-5 px-1">
         <button
@@ -479,10 +564,7 @@ function App() {
           className="relative overflow-hidden bg-white text-stone-500 px-5 py-3 rounded-2xl font-bold text-xs flex items-center gap-2 active:scale-95 transition-transform select-none touch-none cursor-pointer shadow-card border border-stone-100"
           style={{ WebkitUserSelect: 'none' }}
         >
-          <div
-            className="absolute bottom-0 left-0 h-[3px] bg-red-500 transition-all rounded-full"
-            style={{ width: `${resetProgress}%` }}
-          />
+          <div className="absolute bottom-0 left-0 h-[3px] bg-red-500 transition-all rounded-full" style={{ width: `${resetProgress}%` }} />
           <RefreshCcw size={14} />
           <span className="tracking-wider">{resetProgress > 0 ? 'MANTÉN...' : 'REINICIAR'}</span>
         </button>
@@ -497,156 +579,157 @@ function App() {
       </div>
 
       {showReorder && (
-        <div className="fixed inset-0 bg-stone-950/96 z-200 p-6 flex flex-col overflow-y-auto">
+        <div className="fixed inset-0 bg-stone-950/96 z-[200] p-6 flex flex-col overflow-y-auto">
           <div className="flex justify-between items-center mb-8">
             <div>
               <p className="text-red-500 text-xs font-black uppercase tracking-widest mb-1">Ordenar paradas</p>
               <h2 className="text-white text-3xl font-black tracking-tight">COLA DE REPARTO</h2>
             </div>
-            <button
-              onClick={() => setShowReorder(false)}
-              className="bg-white/10 p-3 rounded-2xl text-white hover:bg-white/20 transition-colors cursor-pointer"
-            >
+            <button onClick={() => setShowReorder(false)} className="bg-white/10 p-3 rounded-2xl text-white hover:bg-white/20 transition-colors cursor-pointer">
               <X size={20} />
             </button>
           </div>
 
           <div className="flex-1 space-y-3 pb-8">
-            {pedidos.map((p, i) => (
-              <div
-                key={i}
-                className={`
-                  flex items-center p-5 rounded-3xl border-2 transition-all duration-200
-                  ${i === index
-                    ? 'bg-red-600 border-red-400 shadow-cta'
-                    : 'bg-white/5 border-white/10 hover:bg-white/8'}
-                `}
-              >
-                <div className="flex-1 pr-3 min-w-0">
-                  <p className={`text-[10px] font-black uppercase tracking-widest mb-1 ${i === index ? 'text-red-200' : 'text-white/40'}`}>
-                    Parada {i + 1}
-                    {i === index && ' · EN CURSO'}
-                  </p>
-                  <p className="text-white font-bold leading-tight truncate">{p.direccion}</p>
-                  <p className={`text-[11px] mt-1 font-semibold ${i === index ? 'text-red-200' : 'text-white/40'}`}>{p.cliente}</p>
+            {pedidos.map((p, i) => {
+              // --- CÁLCULO DE CLASES PARA LA ANIMACIÓN (MODO SPOTIFY CORREGIDO) ---
+              const isMoving = animatingMover?.from === i;
+              const isDisplaced = animatingMover?.to === i;
+
+              // Desactivamos la transición base cuando no hay animación, para que al intercambiarse en el código se peguen de inmediato a su lugar
+              const transClasses = animatingMover !== null ? "transition-all duration-300 ease-in-out" : "";
+              let animClasses = "";
+
+              if (isMoving) {
+                const up = animatingMover.to < animatingMover.from;
+                animClasses = `${up ? "-translate-y-[calc(100%+0.75rem)]" : "translate-y-[calc(100%+0.75rem)]"} z-20 scale-[1.03] shadow-2xl`;
+              } else if (isDisplaced) {
+                const up = animatingMover.from < animatingMover.to;
+                animClasses = `${up ? "-translate-y-[calc(100%+0.75rem)]" : "translate-y-[calc(100%+0.75rem)]"} z-0 opacity-40 scale-[0.98]`;
+              }
+
+              // USAMOS p.id EN EL KEY: Esto es lo que le dice a React que mueva la caja entera, no solo el texto adentro
+              return (
+                <div key={p.id || p.cliente + p.direccion} className={`flex items-center p-5 rounded-3xl border-2 relative ${transClasses} ${i === index ? 'bg-red-600 border-red-400 shadow-cta' : 'bg-white/5 border-white/10 hover:bg-white/8'} ${animClasses}`}>
+                  <div className="flex-1 pr-3 min-w-0">
+                    <p className={`text-[10px] font-black uppercase tracking-widest mb-1 ${i === index ? 'text-red-200' : 'text-white/40'}`}>
+                      Parada {i + 1} {i === index && ' · EN CURSO'}
+                    </p>
+                    <p className="text-white font-bold leading-tight truncate">{p.direccion}</p>
+                    <p className={`text-[11px] mt-1 font-semibold ${i === index ? 'text-red-200' : 'text-white/40'}`}>{p.cliente}</p>
+                  </div>
+                  <div className="flex flex-col gap-2 shrink-0 relative z-30">
+                    <button 
+                      onClick={() => moverPedidoConAnimacion(i, i - 1)} 
+                      disabled={i === 0 || animatingMover !== null} 
+                      className="p-3 bg-white/10 rounded-xl disabled:opacity-20 hover:bg-white/20 transition-colors active:scale-90 cursor-pointer"
+                    >
+                      <ArrowUp size={16} className="text-white" />
+                    </button>
+                    <button 
+                      onClick={() => moverPedidoConAnimacion(i, i + 1)} 
+                      disabled={i === pedidos.length - 1 || animatingMover !== null} 
+                      className="p-3 bg-white/10 rounded-xl disabled:opacity-20 hover:bg-white/20 transition-colors active:scale-90 cursor-pointer"
+                    >
+                      <ArrowDown size={16} className="text-white" />
+                    </button>
+                  </div>
                 </div>
-                <div className="flex flex-col gap-2 shrink-0">
-                  <button
-                    onClick={() => moverPedido(i, i - 1)}
-                    disabled={i === 0}
-                    className="p-3 bg-white/10 rounded-xl disabled:opacity-20 hover:bg-white/20 transition-colors active:scale-90 cursor-pointer"
-                  >
-                    <ArrowUp size={16} className="text-white" />
-                  </button>
-                  <button
-                    onClick={() => moverPedido(i, i + 1)}
-                    disabled={i === pedidos.length - 1}
-                    className="p-3 bg-white/10 rounded-xl disabled:opacity-20 hover:bg-white/20 transition-colors active:scale-90 cursor-pointer"
-                  >
-                    <ArrowDown size={16} className="text-white" />
-                  </button>
-                </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
 
-          <button
-            onClick={() => setShowReorder(false)}
-            className="sticky bottom-4 bg-white text-stone-900 py-5 rounded-[2rem] font-black text-lg w-full shadow-[0_8px_32px_rgba(0,0,0,0.3)] active:scale-[0.97] transition-transform cursor-pointer"
-          >
+          <button onClick={() => setShowReorder(false)} className="sticky bottom-4 bg-white text-stone-900 py-5 rounded-[2rem] font-black text-lg w-full shadow-[0_8px_32px_rgba(0,0,0,0.3)] active:scale-[0.97] transition-transform cursor-pointer">
             CONFIRMAR ORDEN
           </button>
         </div>
       )}
 
       <div className="bg-white p-1.5 rounded-2xl flex mb-5 shadow-card border border-stone-100 shrink-0">
-        <button
-          onClick={() => setModo('carga')}
-          className={`
-            flex-1 py-3.5 rounded-xl font-black text-xs sm:text-sm transition-all duration-200 cursor-pointer
-            ${modo === 'carga'
-              ? 'bg-red-600 text-white shadow-cta scale-[1.02]'
-              : 'text-stone-400 hover:text-stone-600'}
-          `}
-        >
-          1 · CHECK-IN
-        </button>
-        <button
-          onClick={cambiarAModoReparto}
-          disabled={!todoCargado}
-          className={`
-            flex-1 py-3.5 rounded-xl font-black text-xs sm:text-sm transition-all duration-200 cursor-pointer
-            ${modo === 'reparto'
-              ? 'bg-red-600 text-white shadow-cta scale-[1.02]'
-              : 'text-stone-400 hover:text-stone-600 disabled:opacity-30 disabled:cursor-not-allowed'}
-          `}
-        >
-          2 · EN RUTA
-        </button>
+        <button onClick={() => setModo('carga')} className={`flex-1 py-3.5 rounded-xl font-black text-xs sm:text-sm transition-all duration-200 cursor-pointer ${modo === 'carga' ? 'bg-red-600 text-white shadow-cta scale-[1.02]' : 'text-stone-400 hover:text-stone-600'}`}>1 · CHECK-IN</button>
+        <button onClick={intentarComenzarRuta} disabled={!todoCargado} className={`flex-1 py-3.5 rounded-xl font-black text-xs sm:text-sm transition-all duration-200 cursor-pointer ${modo === 'reparto' ? 'bg-red-600 text-white shadow-cta scale-[1.02]' : 'text-stone-400 hover:text-stone-600 disabled:opacity-30 disabled:cursor-not-allowed'}`}>2 · EN RUTA</button>
       </div>
 
       <div className="flex-1 bg-white rounded-[2.5rem] p-6 sm:p-8 shadow-card card-accent-top flex flex-col relative animate-slide-up">
         <div className="flex items-center justify-between mb-7 bg-stone-50 p-2 rounded-2xl border border-stone-100">
-          <button
-            onClick={retroceder}
-            disabled={index === 0}
-            aria-label="Parada anterior"
-            className="w-14 h-14 flex items-center justify-center bg-white text-stone-700 rounded-xl shadow-card disabled:opacity-25 active:scale-90 transition-all duration-150 cursor-pointer border border-stone-100"
-          >
-            <ChevronLeft size={26} strokeWidth={2.5} />
-          </button>
-
+          <button onClick={retroceder} disabled={index === 0} aria-label="Parada anterior" className="w-14 h-14 flex items-center justify-center bg-white text-stone-700 rounded-xl shadow-card disabled:opacity-25 active:scale-90 transition-all duration-150 cursor-pointer border border-stone-100"><ChevronLeft size={26} strokeWidth={2.5} /></button>
           <div className="text-center">
             <p className="text-red-600 text-xs font-black uppercase tracking-widest">Parada</p>
-            <p className="text-stone-900 text-2xl font-black leading-none">
-              {index + 1}
-              <span className="text-stone-300 font-semibold text-lg"> / {pedidos.length}</span>
-            </p>
+            <p className="text-stone-900 text-2xl font-black leading-none">{index + 1}<span className="text-stone-300 font-semibold text-lg"> / {pedidos.length}</span></p>
           </div>
-
-          <button
-            onClick={avanzar}
-            disabled={index === pedidos.length - 1}
-            aria-label="Parada siguiente"
-            className="w-14 h-14 flex items-center justify-center bg-white text-stone-700 rounded-xl shadow-card disabled:opacity-25 active:scale-90 transition-all duration-150 cursor-pointer border border-stone-100"
-          >
-            <ChevronRight size={26} strokeWidth={2.5} />
-          </button>
+          <button onClick={avanzar} disabled={index === pedidos.length - 1} aria-label="Parada siguiente" className="w-14 h-14 flex items-center justify-center bg-white text-stone-700 rounded-xl shadow-card disabled:opacity-25 active:scale-90 transition-all duration-150 cursor-pointer border border-stone-100"><ChevronRight size={26} strokeWidth={2.5} /></button>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 lg:gap-10 flex-1">
           <div className="flex flex-col gap-5">
-            <div className="flex items-start justify-between gap-4">
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-black text-stone-400 uppercase tracking-widest mb-1">Cliente</p>
-                <h2 className="text-2xl sm:text-3xl font-black text-stone-900 leading-tight tracking-tight wrap-break-word">
-                  {pedidoActual.cliente.startsWith('569') ? 'Cliente Web' : pedidoActual.cliente}
-                </h2>
-                {pedidoActual.telefono && (
-                  <a
-                    href={`tel:+${pedidoActual.telefono}`}
-                    className="mt-2 inline-flex items-center gap-2 text-sm font-bold text-stone-400 hover:text-stone-600 transition-colors"
-                  >
-                    <Phone size={13} /> +{pedidoActual.telefono}
-                  </a>
-                )}
+            
+            {/* INICIO BLOQUE: LÁPIZ Y DATOS DEL CLIENTE */}
+            {modoEdicion ? (
+              <div className="animate-jiggle bg-stone-100/50 p-5 rounded-[2rem] border-2 border-stone-200 shadow-inner flex flex-col gap-4 relative z-10">
+                <div className="flex items-center justify-between mb-1">
+                  <p className="text-xs font-black text-stone-500 uppercase tracking-widest flex items-center gap-2">
+                    <Pencil size={14}/> Editando Datos
+                  </p>
+                </div>
+                <input 
+                  type="text" value={formEdicion.cliente} onChange={e => setFormEdicion({...formEdicion, cliente: e.target.value})}
+                  className="w-full bg-white border-2 border-stone-200 rounded-xl px-4 py-3 font-black text-stone-900 text-lg outline-none focus:border-red-400 shadow-sm" placeholder="Nombre del cliente"
+                />
+                <input 
+                  type="number" value={formEdicion.telefono} onChange={e => setFormEdicion({...formEdicion, telefono: e.target.value})}
+                  className="w-full bg-white border-2 border-stone-200 rounded-xl px-4 py-3 font-bold text-stone-700 outline-none focus:border-red-400 shadow-sm" placeholder="Teléfono (ej: 569...)"
+                />
+                <textarea 
+                  value={formEdicion.direccion} onChange={e => setFormEdicion({...formEdicion, direccion: e.target.value})}
+                  className="w-full bg-white border-2 border-stone-200 rounded-xl px-4 py-3 font-bold text-stone-700 outline-none focus:border-red-400 shadow-sm resize-none h-24" placeholder="Dirección exacta"
+                />
+                <button onClick={guardarEdicion} className="mt-2 w-full bg-emerald-500 text-white font-black py-4 rounded-2xl shadow-wa active:scale-95 flex items-center justify-center gap-2 cursor-pointer transition-transform">
+                  <Save size={18}/> GUARDAR CAMBIOS
+                </button>
               </div>
-              <BotonRayo />
-            </div>
+            ) : (
+              <>
+                <div className="flex items-start justify-between gap-4">
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-3 mb-1">
+                      <p className="text-xs font-black text-stone-400 uppercase tracking-widest">Cliente</p>
+                      
+                      {/* BOTÓN FANTASMA: LÁPIZ */}
+                      <button
+                        onPointerDown={startEditPress}
+                        onPointerUp={stopEditPress}
+                        onPointerLeave={stopEditPress}
+                        className="relative overflow-hidden bg-stone-100 p-1.5 rounded-lg text-stone-400 active:scale-90 transition-transform cursor-pointer shadow-sm"
+                        style={{ WebkitUserSelect: 'none', touchAction: 'none' }}
+                      >
+                        <div className="absolute bottom-0 left-0 h-full bg-stone-300 transition-all" style={{ width: `${editProgress}%` }} />
+                        <Pencil size={12} className="relative z-10" />
+                      </button>
+                    </div>
+                    
+                    <h2 className="text-2xl sm:text-3xl font-black text-stone-900 leading-tight tracking-tight wrap-break-word">
+                      {pedidoActual.cliente.startsWith('569') ? 'Cliente Web' : pedidoActual.cliente}
+                    </h2>
+                    {pedidoActual.telefono && (
+                      <a href={`tel:+${pedidoActual.telefono}`} className="mt-2 inline-flex items-center gap-2 text-sm font-bold text-stone-400 hover:text-stone-600 transition-colors">
+                        <Phone size={13} /> +{pedidoActual.telefono}
+                      </a>
+                    )}
+                  </div>
+                  <BotonRayo />
+                </div>
 
-            <div className="bg-stone-50 p-4 rounded-2xl border border-stone-100 flex items-start gap-3">
-              <div className="bg-red-100 p-2 rounded-xl shrink-0">
-                <MapPin size={16} className="text-red-600" />
-              </div>
-              <p className="text-sm font-bold text-stone-700 leading-snug">{pedidoActual.direccion}</p>
-            </div>
+                <div className="bg-stone-50 p-4 rounded-2xl border border-stone-100 flex items-start gap-3">
+                  <div className="bg-red-100 p-2 rounded-xl shrink-0"><MapPin size={16} className="text-red-600" /></div>
+                  <p className="text-sm font-bold text-stone-700 leading-snug">{pedidoActual.direccion}</p>
+                </div>
+              </>
+            )}
+            {/* FIN BLOQUE: LÁPIZ Y DATOS */}
 
             {modo === 'reparto' && (
               <>
-                <button
-                  onClick={() => abrirMapa(pedidoActual.direccion)}
-                  className="w-full bg-stone-900 text-white h-[60px] rounded-2xl font-black flex justify-center items-center gap-3 active:scale-[0.97] transition-all text-sm shadow-dark cursor-pointer"
-                >
+                <button onClick={() => abrirMapa(pedidoActual.direccion)} className="w-full bg-stone-900 text-white h-[60px] rounded-2xl font-black flex justify-center items-center gap-3 active:scale-[0.97] transition-all text-sm shadow-dark cursor-pointer">
                   <Map size={20} /> NAVEGAR CON MAPS
                 </button>
 
@@ -657,45 +740,28 @@ function App() {
 
                   <div className="flex gap-3 mb-3">
                     <div className="relative shrink-0">
-                      <input
-                        type="number"
-                        value={eta}
-                        onChange={(e) => setEta(e.target.value)}
-                        placeholder="–"
-                        aria-label="Minutos estimados de llegada"
-                        className="w-[68px] h-[52px] text-center font-black bg-white border-2 border-stone-200 rounded-2xl outline-none text-stone-900 focus:border-red-400 transition-colors text-lg"
-                      />
+                      <input type="number" value={eta} onChange={(e) => setEta(e.target.value)} placeholder="–" aria-label="Minutos estimados de llegada" className="w-[68px] h-[52px] text-center font-black bg-white border-2 border-stone-200 rounded-2xl outline-none text-stone-900 focus:border-red-400 transition-colors text-lg" />
                       <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 bg-stone-100 text-[9px] px-2 py-0.5 font-black text-stone-500 rounded-full tracking-wider">MIN</span>
                     </div>
 
                     {pedidoActual.telefono ? (
-                      <button
-                        onClick={enviarAvisoCliente}
-                        disabled={!eta}
-                        className="flex-1 bg-[#25D366] text-white font-black h-[52px] rounded-2xl active:scale-[0.97] flex items-center justify-center text-xs gap-2 shadow-wa disabled:opacity-40 cursor-pointer tracking-wider"
-                      >
+                      <button onClick={enviarAvisoCliente} disabled={!eta} className="flex-1 bg-[#25D366] text-white font-black h-[52px] rounded-2xl active:scale-[0.97] flex items-center justify-center text-xs gap-2 shadow-wa disabled:opacity-40 cursor-pointer tracking-wider">
                         <MessageCircle size={15} /> AVISAR SALIDA
                       </button>
                     ) : (
-                      <div className="flex-1 bg-stone-200 text-stone-400 font-bold h-[52px] rounded-2xl flex items-center justify-center text-xs">
-                        Sin teléfono
-                      </div>
+                      <button onClick={pedirTelefonoAdmin} className="flex-1 bg-stone-800 text-white font-black h-[52px] rounded-2xl active:scale-[0.97] flex items-center justify-center text-[10px] sm:text-xs gap-2 shadow-dark cursor-pointer tracking-wider">
+                        <MessageCircle size={15} /> PEDIR TELÉFONO
+                      </button>
                     )}
                   </div>
 
                   <div className="flex gap-2">
                     {pedidoActual.telefono && (
-                      <button
-                        onClick={enviarAvisoLlegada}
-                        className="flex-1 bg-white border-2 border-[#25D366] text-[#25D366] font-black py-3 rounded-xl text-xs active:scale-95 cursor-pointer tracking-wider"
-                      >
+                      <button onClick={enviarAvisoLlegada} className="flex-1 bg-white border-2 border-[#25D366] text-[#25D366] font-black py-3 rounded-xl text-xs active:scale-95 cursor-pointer tracking-wider">
                         ESTOY AFUERA
                       </button>
                     )}
-                    <button
-                      onClick={avisarAdmin}
-                      className="flex-1 bg-stone-200 text-stone-700 font-black py-3 rounded-xl text-xs border border-stone-300 active:scale-95 cursor-pointer tracking-wider"
-                    >
+                    <button onClick={avisarAdmin} className="flex-1 bg-stone-200 text-stone-700 font-black py-3 rounded-xl text-xs border border-stone-300 active:scale-95 cursor-pointer tracking-wider">
                       INFORMAR ADMIN
                     </button>
                   </div>
@@ -720,40 +786,10 @@ function App() {
               {pedidoActual.items.map((it, i) => {
                 const activo = modo === 'carga' ? it.marcado : it.sacado;
                 return (
-                  <label
-                    key={i}
-                    className={`
-                      flex items-center p-5 rounded-2xl border-2 transition-all duration-200 cursor-pointer
-                      ${modo === 'carga'
-                        ? activo
-                          ? 'bg-emerald-50 border-emerald-200'
-                          : 'bg-white border-stone-200 shadow-card hover:border-stone-300'
-                        : activo
-                          ? 'bg-red-50 border-red-200'
-                          : 'bg-white border-stone-200 shadow-card hover:border-stone-300'}
-                    `}
-                  >
-                    <input
-                      type="checkbox"
-                      checked={activo}
-                      onChange={() => toggleCaja(i)}
-                      className={`
-                        w-7 h-7 rounded-lg border-2 mr-4 shrink-0
-                        ${modo === 'carga' ? 'accent-emerald-500' : 'accent-red-600'}
-                      `}
-                    />
-                    <span className={`
-                      text-base sm:text-lg font-bold leading-tight transition-all
-                      ${activo ? 'line-through opacity-50' : 'text-stone-800'}
-                    `}>
-                      {it.nombre}
-                    </span>
-                    {activo && (
-                      <CheckCircle2
-                        size={18}
-                        className={`ml-auto shrink-0 ${modo === 'carga' ? 'text-emerald-500' : 'text-red-400'}`}
-                      />
-                    )}
+                  <label key={i} className={`flex items-center p-5 rounded-2xl border-2 transition-all duration-200 cursor-pointer ${modo === 'carga' ? activo ? 'bg-emerald-50 border-emerald-200' : 'bg-white border-stone-200 shadow-card hover:border-stone-300' : activo ? 'bg-red-50 border-red-200' : 'bg-white border-stone-200 shadow-card hover:border-stone-300'}`}>
+                    <input type="checkbox" checked={activo} onChange={() => toggleCaja(i)} className={`w-7 h-7 rounded-lg border-2 mr-4 shrink-0 ${modo === 'carga' ? 'accent-emerald-500' : 'accent-red-600'}`} />
+                    <span className={`text-base sm:text-lg font-bold leading-tight transition-all ${activo ? 'line-through opacity-50' : 'text-stone-800'}`}>{it.nombre}</span>
+                    {activo && <CheckCircle2 size={18} className={`ml-auto shrink-0 ${modo === 'carga' ? 'text-emerald-500' : 'text-red-400'}`} />}
                   </label>
                 );
               })}
