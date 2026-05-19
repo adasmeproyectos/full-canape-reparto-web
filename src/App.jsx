@@ -29,8 +29,10 @@ function App() {
   const [showReorder, setShowReorder] = useState(false);
   const [resetProgress, setResetProgress] = useState(0);
 
-  // ESTADO FASE 1: Alerta del Check-in
+  // --- ESTADO FASE 1: Alerta Modal Multicontrol ---
   const [alertaSinTelefono, setAlertaSinTelefono] = useState(null);
+  const [modalEditId, setModalEditId] = useState(null);
+  const [modalEditPhone, setModalEditPhone] = useState('');
 
   // --- ESTADOS FASE 2: MODO LÁPIZ ---
   const [modoEdicion, setModoEdicion] = useState(false);
@@ -41,6 +43,11 @@ function App() {
   // --- ESTADOS FASE 3: ANIMACIÓN Y ACORDEÓN ---
   const [animatingMover, setAnimatingMover] = useState(null);
   const [expandedAdminId, setExpandedAdminId] = useState(null);
+
+  // --- ESTADOS ADMIN "FILTRO FANTASMA" ---
+  const [hiddenRutas, setHiddenRutas] = useState(() => getMemoria('fc_hidden_rutas', {}));
+  const [hideProgress, setHideProgress] = useState({ id: null, progress: 0 });
+  const hideTimer = useRef(null);
 
   const pressTimer  = useRef(null);
   const resetTimer  = useRef(null);
@@ -53,13 +60,14 @@ function App() {
   const adminTimer = useRef(null);
 
   useEffect(() => {
-    localStorage.setItem('fc_input',    JSON.stringify(input));
-    localStorage.setItem('fc_pedidos',  JSON.stringify(pedidos));
-    localStorage.setItem('fc_historial',JSON.stringify(historial));
-    localStorage.setItem('fc_index',    JSON.stringify(index));
-    localStorage.setItem('fc_modo',     JSON.stringify(modo));
-    localStorage.setItem('fc_eta',      JSON.stringify(eta));
-  }, [input, pedidos, historial, index, modo, eta]);
+    localStorage.setItem('fc_input',        JSON.stringify(input));
+    localStorage.setItem('fc_pedidos',      JSON.stringify(pedidos));
+    localStorage.setItem('fc_historial',    JSON.stringify(historial));
+    localStorage.setItem('fc_index',        JSON.stringify(index));
+    localStorage.setItem('fc_modo',         JSON.stringify(modo));
+    localStorage.setItem('fc_eta',          JSON.stringify(eta));
+    localStorage.setItem('fc_hidden_rutas', JSON.stringify(hiddenRutas));
+  }, [input, pedidos, historial, index, modo, eta, hiddenRutas]);
 
   // --- LÓGICA DE SINCRONIZACIÓN EN LA NUBE ---
   const sincronizarConNube = async () => {
@@ -98,12 +106,14 @@ function App() {
   // --- LÓGICA DEL MODO DIOS (ADMIN) ---
   const cargarRutasEnVivo = async () => {
     try {
+      // Quitamos el filtro para ver si así llegan los datos
       const { data, error } = await supabase.from('monitoreo_rutas')
         .select('*')
         .order('ultima_actualizacion', { ascending: false });
       
       if (error) console.error("Error en lectura:", error);
       if (data) {
+        console.log("Datos recibidos por el admin:", data);
         setRutasEnVivo(data);
       }
     } catch(e) { console.error(e); }
@@ -123,6 +133,26 @@ function App() {
     }, 50);
   };
   const stopAdmin = () => { clearInterval(adminTimer.current); setAdminProgress(0); };
+
+  // --- LÓGICA FILTRO FANTASMA (Ocultar Repartidor) ---
+  const startHide = (id) => {
+    setHideProgress({ id, progress: 0 });
+    hideTimer.current = setInterval(() => {
+      setHideProgress(prev => {
+        if (prev.progress >= 100) {
+          clearInterval(hideTimer.current);
+          setHiddenRutas(h => ({ ...h, [id]: Date.now() })); // Guardamos la hora de ocultamiento
+          return { id: null, progress: 0 };
+        }
+        return { id, progress: prev.progress + 5 };
+      });
+    }, 40);
+  };
+  
+  const stopHide = () => {
+    clearInterval(hideTimer.current);
+    setHideProgress({ id: null, progress: 0 });
+  };
   
   const handleProcesar = async () => {
     setCargando(true);
@@ -130,8 +160,7 @@ function App() {
       const data = await procesarPedidos(input);
       const preparar = (ruta) => ruta.map(p => ({
         ...p,
-        id: Math.random().toString(36).substring(2, 9), 
-        // Agregamos entrega_at: null para registrar la hora después
+        id: Math.random().toString(36).substring(2, 9), // 🪪 Carnet de Identidad oculto para que no se maree la UI
         items: p.items.map(i => ({ nombre: i, marcado: false, sacado: false, entrega_at: null }))
       }));
       if (data.pedidos && data.pedidos.length > 0) {
@@ -187,7 +216,7 @@ function App() {
     
     setTimeout(() => {
       moverPedido(from, to);
-      setAnimatingMover(null);
+      setAnimatingMover(null); // Al borrar esto, el CSS se apaga justo cuando la tarjeta cae en su nueva posición física
     }, 300);
   };
 
@@ -199,11 +228,31 @@ function App() {
   };
 
   const intentarComenzarRuta = () => {
-    const faltan = pedidos.map((p, i) => ({ ...p, numOriginal: i + 1 })).filter(p => !p.telefono);
+    // Escaneamos toda la lista y guardamos el índice real de cada pedido sin teléfono
+    const faltan = pedidos.map((p, i) => ({ ...p, originalIndex: i })).filter(p => !p.telefono);
     if (faltan.length > 0) {
-      setAlertaSinTelefono(faltan[0]);
+      setAlertaSinTelefono(faltan); // Array completo
     } else {
       cambiarAModoReparto();
+    }
+  };
+
+  // Lógica para guardar un teléfono desde adentro del modal
+  const guardarTelefonoModal = (idx) => {
+    const nuevos = [...pedidos];
+    nuevos[idx].telefono = modalEditPhone;
+    setPedidos(nuevos);
+    setModalEditId(null);
+    setModalEditPhone('');
+    
+    // Filtramos la lista del modal para quitar el que acabamos de arreglar
+    const restantes = alertaSinTelefono.filter(item => item.originalIndex !== idx);
+    if (restantes.length === 0) {
+      // Si ya no quedan errores, cerramos el modal y salimos a ruta automáticamente
+      setAlertaSinTelefono(null);
+      cambiarAModoReparto();
+    } else {
+      setAlertaSinTelefono(restantes);
     }
   };
 
@@ -268,7 +317,6 @@ function App() {
       n[index].items[i].marcado = !n[index].items[i].marcado;
     } else {
       n[index].items[i].sacado  = !n[index].items[i].sacado;
-      // Capturamos la hora al marcar como entregado
       n[index].items[i].entrega_at = n[index].items[i].sacado ? new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null;
     }
     setPedidos(n);
@@ -351,6 +399,15 @@ function App() {
   );
 
   if (showAdmin) {
+    // Calculamos qué rutas se deben mostrar usando el Filtro Fantasma
+    const rutasVisibles = rutasEnVivo.filter(ruta => {
+      const hiddenAt = hiddenRutas[ruta.id];
+      if (!hiddenAt) return true; // Si nunca lo hemos ocultado, se muestra
+      // Si fue ocultado, solo se muestra si la nube tiene un timestamp MÁS NUEVO que el de ocultamiento
+      const updatedAt = new Date(ruta.ultima_actualizacion).getTime();
+      return updatedAt > hiddenAt;
+    });
+
     return (
       <div className="min-h-screen bg-stone-950 p-6 flex flex-col relative max-w-xl mx-auto text-white">
         <div className="flex justify-between items-center mb-8">
@@ -368,12 +425,11 @@ function App() {
         </button>
 
         <div className="flex-1 space-y-4 overflow-y-auto pb-8">
-          {rutasEnVivo.length === 0 ? (
+          {rutasVisibles.length === 0 ? (
             <p className="text-stone-500 text-center mt-10 font-bold">No hay repartidores activos en la calle.</p>
           ) : (
-            rutasEnVivo.map(ruta => {
+            rutasVisibles.map(ruta => {
               const porcentaje = Math.round((ruta.progreso_actual / ruta.total_pedidos) * 100) || 0;
-              // Calculamos si la ruta está "vieja"
               const horasPasadas = (new Date() - new Date(ruta.ultima_actualizacion)) / (1000 * 60 * 60);
               const isStale = horasPasadas > 12;
               
@@ -392,17 +448,28 @@ function App() {
                         Progreso: {ruta.progreso_actual}/{ruta.total_pedidos} ({porcentaje}%)
                       </p>
                     </div>
-                    <ChevronDown className={`transition-transform duration-300 ${expandedAdminId === ruta.id ? 'rotate-180' : ''}`} />
+                    
+                    {/* Boton X y Flecha Acordeón */}
+                    <div className="flex items-center gap-3">
+                      <ChevronDown className={`transition-transform duration-300 ${expandedAdminId === ruta.id ? 'rotate-180' : ''}`} />
+                      <button
+                        onPointerDown={(e) => { e.stopPropagation(); startHide(ruta.id); }}
+                        onPointerUp={(e) => { e.stopPropagation(); stopHide(); }}
+                        onPointerLeave={(e) => { e.stopPropagation(); stopHide(); }}
+                        className="relative overflow-hidden bg-white/10 p-2 rounded-xl text-stone-400 active:scale-90 transition-transform shadow-sm"
+                        style={{ WebkitUserSelect: 'none', touchAction: 'none' }}
+                      >
+                        <div className="absolute bottom-0 left-0 h-full bg-red-500 transition-all" style={{ width: hideProgress.id === ruta.id ? `${hideProgress.progress}%` : '0%' }} />
+                        <X size={16} className="relative z-10" />
+                      </button>
+                    </div>
                   </div>
                   
-                  <div 
-                    className={`overflow-hidden transition-all duration-300 ease-in-out ${expandedAdminId === ruta.id ? 'max-h-[1000px] opacity-100 mt-5 pt-5 border-t border-white/10' : 'max-h-0 opacity-0'}`}
-                  >
+                  <div className={`overflow-hidden transition-all duration-300 ease-in-out ${expandedAdminId === ruta.id ? 'max-h-[1000px] opacity-100 mt-5 pt-5 border-t border-white/10' : 'max-h-0 opacity-0'}`}>
                     <div className="space-y-3">
                       {ruta.pedidos_json.map((p, i) => {
                         const entregado = p.items.some(it => it.sacado);
                         const horaEntrega = p.items.find(it => it.sacado)?.entrega_at;
-                        
                         return (
                           <div key={i} className="flex justify-between items-center bg-black/30 p-3 rounded-xl border border-white/5">
                             <div className="min-w-0 pr-3">
@@ -410,11 +477,7 @@ function App() {
                               <p className="text-sm font-bold text-stone-300 truncate">{p.direccion}</p>
                             </div>
                             <div className="shrink-0 text-right">
-                              {entregado ? (
-                                <span className="text-emerald-400 font-black text-sm">{horaEntrega || "✓"}</span>
-                              ) : (
-                                <span className="text-stone-600 font-black text-xs uppercase">Pendiente</span>
-                              )}
+                              {entregado ? <span className="text-emerald-400 font-black text-sm">{horaEntrega || "✓"}</span> : <span className="text-stone-600 font-black text-xs uppercase">Pendiente</span>}
                             </div>
                           </div>
                         );
@@ -566,23 +629,52 @@ function App() {
 
       <div className={`fixed inset-0 bg-white z-[100] transition-all duration-700 pointer-events-none ${absorbiendo ? 'opacity-100 scale-150 rounded-none' : 'opacity-0 scale-0 rounded-full'}`} style={{ transformOrigin: 'bottom center' }} />
 
-      {/* MODAL DE ALERTA DE TELÉFONO (CHECK-IN) */}
+      {/* --- NUEVO MODAL MULTICONTROL DE TELÉFONOS --- */}
       {alertaSinTelefono && (
-        <div className="fixed inset-0 bg-stone-950/80 z-[300] flex items-center justify-center p-6 animate-pop-in">
-          <div className="bg-white rounded-[2rem] p-8 max-w-sm w-full shadow-2xl flex flex-col items-center text-center">
-            <div className="bg-amber-100 text-amber-600 p-4 rounded-full w-20 h-20 flex items-center justify-center mb-6">
-              <AlertTriangle size={36} strokeWidth={2.5} />
+        <div className="fixed inset-0 bg-stone-950/80 z-[300] flex items-center justify-center p-4 sm:p-6 animate-pop-in">
+          <div className="bg-white rounded-[2rem] p-6 max-w-sm w-full shadow-2xl flex flex-col max-h-[90vh]">
+            
+            <div className="flex flex-col items-center text-center mb-6 shrink-0">
+              <div className="bg-amber-100 text-amber-600 p-4 rounded-full w-16 h-16 flex items-center justify-center mb-4">
+                <AlertTriangle size={32} strokeWidth={2.5} />
+              </div>
+              <h3 className="text-2xl font-black text-stone-900 mb-2 leading-tight tracking-tight">Faltan Teléfonos</h3>
+              <p className="text-stone-500 text-sm font-medium leading-relaxed">
+                A las siguientes <strong className="text-stone-900">{alertaSinTelefono.length}</strong> paradas les falta el número:
+              </p>
             </div>
-            <h3 className="text-3xl font-black text-stone-900 mb-3 leading-tight tracking-tight">Ten cuidado</h3>
-            <p className="text-stone-500 font-medium mb-8 leading-relaxed">
-              Al pedido de la dirección <strong className="text-stone-900">{alertaSinTelefono.direccion}</strong> correspondiente a la parada <strong className="text-red-500">#{alertaSinTelefono.numOriginal}</strong> le falta el número de teléfono.
-            </p>
+
+            <div className="flex-1 overflow-y-auto space-y-3 mb-6 pr-1">
+              {alertaSinTelefono.map((p) => (
+                <div key={p.originalIndex} className="bg-stone-50 p-4 rounded-2xl border border-stone-100">
+                  <p className="text-[10px] font-black text-red-500 uppercase tracking-widest mb-1">Parada {p.originalIndex + 1}</p>
+                  <p className="text-sm font-bold text-stone-800 leading-snug mb-3 truncate">{p.direccion}</p>
+                  
+                  {modalEditId === p.originalIndex ? (
+                    <div className="flex gap-2">
+                      <input
+                        type="number"
+                        value={modalEditPhone}
+                        onChange={e => setModalEditPhone(e.target.value)}
+                        placeholder="Ej: 569..."
+                        className="flex-1 bg-white border-2 border-stone-200 rounded-xl px-3 py-2 text-sm font-bold outline-none focus:border-red-400"
+                      />
+                      <button onClick={() => guardarTelefonoModal(p.originalIndex)} className="bg-emerald-500 text-white p-2 rounded-xl shadow-sm active:scale-95 cursor-pointer">
+                        <Save size={16} />
+                      </button>
+                    </div>
+                  ) : (
+                    <button onClick={() => { setModalEditId(p.originalIndex); setModalEditPhone(''); }} className="w-full flex items-center justify-center gap-2 bg-white border-2 border-stone-200 text-stone-500 py-2 rounded-xl text-xs font-black hover:border-stone-300 active:scale-95 transition-all cursor-pointer">
+                      <Pencil size={12} /> AGREGAR TELÉFONO
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+
             <button
-              onClick={() => {
-                setAlertaSinTelefono(null);
-                cambiarAModoReparto();
-              }}
-              className="w-full bg-stone-900 text-white h-[68px] rounded-3xl font-black text-base active:scale-[0.97] transition-transform shadow-dark cursor-pointer tracking-wider"
+              onClick={() => { setAlertaSinTelefono(null); cambiarAModoReparto(); }}
+              className="w-full shrink-0 bg-stone-900 text-white h-[60px] rounded-2xl font-black text-sm active:scale-[0.97] transition-transform shadow-dark cursor-pointer tracking-wider"
             >
               CONTINUAR DE TODAS FORMAS
             </button>
