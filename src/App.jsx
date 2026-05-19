@@ -4,7 +4,7 @@ import { supabase } from './lib/supabase';
 import { 
   ChevronLeft, ChevronRight, Package, MapPin, Loader2, CheckCircle2, 
   Map, Zap, Truck, Home, Phone, MessageCircle, RefreshCcw, ListOrdered, 
-  X, ArrowUp, ArrowDown, AlertTriangle, Pencil, Save 
+  X, ArrowUp, ArrowDown, AlertTriangle, Pencil, Save, Clock, ChevronDown 
 } from 'lucide-react';
 
 const getMemoria = (clave, valorPorDefecto) => {
@@ -38,8 +38,9 @@ function App() {
   const [editProgress, setEditProgress] = useState(0);
   const editTimer = useRef(null);
 
-  // --- ESTADO FASE 3: ANIMACIÓN MODO SPOTIFY ---
+  // --- ESTADOS FASE 3: ANIMACIÓN Y ACORDEÓN ---
   const [animatingMover, setAnimatingMover] = useState(null);
+  const [expandedAdminId, setExpandedAdminId] = useState(null);
 
   const pressTimer  = useRef(null);
   const resetTimer  = useRef(null);
@@ -96,19 +97,17 @@ function App() {
 
   // --- LÓGICA DEL MODO DIOS (ADMIN) ---
   const cargarRutasEnVivo = async () => {
-  try {
-    // Quitamos el filtro para ver si así llegan los datos
-    const { data, error } = await supabase.from('monitoreo_rutas')
-      .select('*')
-      .order('ultima_actualizacion', { ascending: false });
-    
-    if (error) console.error("Error en lectura:", error);
-    if (data) {
-      console.log("Datos recibidos por el admin:", data);
-      setRutasEnVivo(data);
-    }
-  } catch(e) { console.error(e); }
-};
+    try {
+      const { data, error } = await supabase.from('monitoreo_rutas')
+        .select('*')
+        .order('ultima_actualizacion', { ascending: false });
+      
+      if (error) console.error("Error en lectura:", error);
+      if (data) {
+        setRutasEnVivo(data);
+      }
+    } catch(e) { console.error(e); }
+  };
 
   const startAdmin = () => {
     adminTimer.current = setInterval(() => {
@@ -131,8 +130,9 @@ function App() {
       const data = await procesarPedidos(input);
       const preparar = (ruta) => ruta.map(p => ({
         ...p,
-        id: Math.random().toString(36).substring(2, 9), // 🪪 Carnet de Identidad oculto para que no se maree la UI
-        items: p.items.map(i => ({ nombre: i, marcado: false, sacado: false }))
+        id: Math.random().toString(36).substring(2, 9), 
+        // Agregamos entrega_at: null para registrar la hora después
+        items: p.items.map(i => ({ nombre: i, marcado: false, sacado: false, entrega_at: null }))
       }));
       if (data.pedidos && data.pedidos.length > 0) {
         const nuevosPedidos = preparar(data.pedidos);
@@ -187,7 +187,7 @@ function App() {
     
     setTimeout(() => {
       moverPedido(from, to);
-      setAnimatingMover(null); // Al borrar esto, el CSS se apaga justo cuando la tarjeta cae en su nueva posición física
+      setAnimatingMover(null);
     }, 300);
   };
 
@@ -264,8 +264,13 @@ function App() {
   
   const toggleCaja  = (i) => {
     const n = [...pedidos];
-    if (modo === 'carga') n[index].items[i].marcado = !n[index].items[i].marcado;
-    else                  n[index].items[i].sacado  = !n[index].items[i].sacado;
+    if (modo === 'carga') {
+      n[index].items[i].marcado = !n[index].items[i].marcado;
+    } else {
+      n[index].items[i].sacado  = !n[index].items[i].sacado;
+      // Capturamos la hora al marcar como entregado
+      n[index].items[i].entrega_at = n[index].items[i].sacado ? new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : null;
+    }
     setPedidos(n);
   };
   
@@ -281,8 +286,12 @@ function App() {
         pressTimer.current = setTimeout(() => {
           const n = [...pedidos];
           n[index].items.forEach(it => {
-            if (modo === 'carga') it.marcado = true;
-            else it.sacado = true;
+            if (modo === 'carga') {
+              it.marcado = true;
+            } else {
+              it.sacado = true;
+              it.entrega_at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            }
           });
           setPedidos(n); setPresionando(false);
         }, 800);
@@ -364,26 +373,52 @@ function App() {
           ) : (
             rutasEnVivo.map(ruta => {
               const porcentaje = Math.round((ruta.progreso_actual / ruta.total_pedidos) * 100) || 0;
-              const pedidoActualInfo = ruta.pedidos_json[ruta.progreso_actual] || ruta.pedidos_json[ruta.pedidos_json.length - 1];
+              // Calculamos si la ruta está "vieja"
+              const horasPasadas = (new Date() - new Date(ruta.ultima_actualizacion)) / (1000 * 60 * 60);
+              const isStale = horasPasadas > 12;
               
               return (
-                <div key={ruta.id} className="bg-stone-900 border-2 border-white/5 p-6 rounded-3xl shadow-2xl">
-                  <div className="flex justify-between items-center mb-4">
-                    <h3 className="font-black text-xl uppercase tracking-widest">{ruta.nombre_repartidor}</h3>
-                    <span className="text-red-500 font-black text-lg">{porcentaje}%</span>
-                  </div>
-                  
-                  <div className="w-full h-3 bg-black rounded-full overflow-hidden mb-4 border border-white/5">
-                    <div className="h-full bg-red-600 transition-all duration-1000 ease-out relative" style={{ width: `${porcentaje}%` }}>
-                      <div className="absolute top-0 right-0 bottom-0 w-4 bg-white/30 animate-pulse"></div>
-                    </div>
-                  </div>
-                  
-                  <div className="flex items-start gap-2 bg-black/50 p-3 rounded-xl border border-white/5">
-                    <MapPin size={14} className="text-red-500 mt-0.5 shrink-0" />
+                <div key={ruta.id} className={`bg-stone-900 p-6 rounded-3xl border transition-colors ${isStale ? 'border-amber-600' : 'border-white/10'}`}>
+                  <div 
+                    className="flex justify-between items-center cursor-pointer select-none" 
+                    onClick={() => setExpandedAdminId(expandedAdminId === ruta.id ? null : ruta.id)}
+                  >
                     <div>
-                      <p className="text-xs text-stone-500 font-black uppercase tracking-widest">Entregando ahora:</p>
-                      <p className="text-sm font-bold text-stone-300 leading-snug truncate">{pedidoActualInfo?.direccion || 'Ruta finalizada'}</p>
+                      <h3 className="font-black text-lg flex items-center gap-2">
+                        {ruta.nombre_repartidor}
+                        {isStale && <Clock size={16} className="text-amber-500" />}
+                      </h3>
+                      <p className="text-xs text-stone-400 mt-1 font-semibold uppercase tracking-wider">
+                        Progreso: {ruta.progreso_actual}/{ruta.total_pedidos} ({porcentaje}%)
+                      </p>
+                    </div>
+                    <ChevronDown className={`transition-transform duration-300 ${expandedAdminId === ruta.id ? 'rotate-180' : ''}`} />
+                  </div>
+                  
+                  <div 
+                    className={`overflow-hidden transition-all duration-300 ease-in-out ${expandedAdminId === ruta.id ? 'max-h-[1000px] opacity-100 mt-5 pt-5 border-t border-white/10' : 'max-h-0 opacity-0'}`}
+                  >
+                    <div className="space-y-3">
+                      {ruta.pedidos_json.map((p, i) => {
+                        const entregado = p.items.some(it => it.sacado);
+                        const horaEntrega = p.items.find(it => it.sacado)?.entrega_at;
+                        
+                        return (
+                          <div key={i} className="flex justify-between items-center bg-black/30 p-3 rounded-xl border border-white/5">
+                            <div className="min-w-0 pr-3">
+                              <p className={`text-[10px] font-black uppercase tracking-widest ${i === ruta.progreso_actual ? 'text-red-400' : 'text-stone-500'}`}>Parada {i + 1}</p>
+                              <p className="text-sm font-bold text-stone-300 truncate">{p.direccion}</p>
+                            </div>
+                            <div className="shrink-0 text-right">
+                              {entregado ? (
+                                <span className="text-emerald-400 font-black text-sm">{horaEntrega || "✓"}</span>
+                              ) : (
+                                <span className="text-stone-600 font-black text-xs uppercase">Pendiente</span>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                   </div>
                 </div>
@@ -592,11 +627,9 @@ function App() {
 
           <div className="flex-1 space-y-3 pb-8">
             {pedidos.map((p, i) => {
-              // --- CÁLCULO DE CLASES PARA LA ANIMACIÓN (MODO SPOTIFY CORREGIDO) ---
               const isMoving = animatingMover?.from === i;
               const isDisplaced = animatingMover?.to === i;
 
-              // Desactivamos la transición base cuando no hay animación, para que al intercambiarse en el código se peguen de inmediato a su lugar
               const transClasses = animatingMover !== null ? "transition-all duration-300 ease-in-out" : "";
               let animClasses = "";
 
@@ -608,7 +641,6 @@ function App() {
                 animClasses = `${up ? "-translate-y-[calc(100%+0.75rem)]" : "translate-y-[calc(100%+0.75rem)]"} z-0 opacity-40 scale-[0.98]`;
               }
 
-              // USAMOS p.id EN EL KEY: Esto es lo que le dice a React que mueva la caja entera, no solo el texto adentro
               return (
                 <div key={p.id || p.cliente + p.direccion} className={`flex items-center p-5 rounded-3xl border-2 relative ${transClasses} ${i === index ? 'bg-red-600 border-red-400 shadow-cta' : 'bg-white/5 border-white/10 hover:bg-white/8'} ${animClasses}`}>
                   <div className="flex-1 pr-3 min-w-0">
