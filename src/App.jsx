@@ -57,6 +57,8 @@ function App() {
   const [showAdmin, setShowAdmin] = useState(false);
   const [adminProgress, setAdminProgress] = useState(0);
   const [rutasEnVivo, setRutasEnVivo] = useState([]);
+  const [loadingAdmin, setLoadingAdmin] = useState(false);
+  const [adminError, setAdminError] = useState(null);
   const adminTimer = useRef(null);
 
   useEffect(() => {
@@ -105,18 +107,50 @@ function App() {
 
   // --- LÓGICA DEL MODO DIOS (ADMIN) ---
   const cargarRutasEnVivo = async () => {
+    if (!supabase) {
+      setAdminError("Sin conexión a la nube.");
+      return;
+    }
+    setLoadingAdmin(true);
+    setAdminError(null);
     try {
-      // Quitamos el filtro para ver si así llegan los datos
-      const { data, error } = await supabase.from('monitoreo_rutas')
-        .select('*')
-        .order('ultima_actualizacion', { ascending: false });
-      
-      if (error) console.error("Error en lectura:", error);
-      if (data) {
-        console.log("Datos recibidos por el admin:", data);
+      // Filtramos estrictamente las últimas 48h para evitar timeouts
+      // y solicitamos solo las columnas necesarias (no SELECT *)
+      const fechaLimite = new Date();
+      fechaLimite.setHours(fechaLimite.getHours() - 48);
+
+      // AbortController para cortar la consulta si tarda más de 8 segundos
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 8000);
+
+      const { data, error } = await supabase
+        .from('monitoreo_rutas')
+        .select('id, nombre_repartidor, progreso_actual, total_pedidos, pedidos_json, ultima_actualizacion, esta_activo')
+        .gte('ultima_actualizacion', fechaLimite.toISOString())
+        .eq('esta_activo', true)
+        .order('ultima_actualizacion', { ascending: false })
+        .limit(20)
+        .abortSignal(controller.signal);
+
+      clearTimeout(timeoutId);
+
+      if (error) {
+        console.error("❌ Error radar:", error.message);
+        setAdminError("Error al cargar datos. Intenta de nuevo.");
+      } else if (data) {
+        console.log(`✅ Radar: ${data.length} ruta(s) activa(s) recibidas.`);
         setRutasEnVivo(data);
       }
-    } catch(e) { console.error(e); }
+    } catch(e) {
+      if (e.name === 'AbortError') {
+        setAdminError("Tiempo de espera agotado. Verifica tu conexión.");
+      } else {
+        setAdminError("Error de red inesperado.");
+      }
+      console.error("❌ Error cargarRutasEnVivo:", e);
+    } finally {
+      setLoadingAdmin(false);
+    }
   };
 
   const startAdmin = () => {
@@ -399,89 +433,182 @@ function App() {
   );
 
   if (showAdmin) {
-    // Calculamos qué rutas se deben mostrar usando el Filtro Fantasma
+    // Filtro Fantasma: solo mostramos rutas no ocultadas o con actividad posterior al ocultamiento
     const rutasVisibles = rutasEnVivo.filter(ruta => {
       const hiddenAt = hiddenRutas[ruta.id];
-      if (!hiddenAt) return true; // Si nunca lo hemos ocultado, se muestra
-      // Si fue ocultado, solo se muestra si la nube tiene un timestamp MÁS NUEVO que el de ocultamiento
+      if (!hiddenAt) return true;
       const updatedAt = new Date(ruta.ultima_actualizacion).getTime();
       return updatedAt > hiddenAt;
     });
 
     return (
-      <div className="min-h-screen bg-stone-950 p-6 flex flex-col relative max-w-xl mx-auto text-white">
-        <div className="flex justify-between items-center mb-8">
+      <div
+        className="min-h-screen bg-stone-950 flex flex-col relative max-w-xl mx-auto text-white"
+        style={{
+          paddingTop: 'max(1.5rem, env(safe-area-inset-top))',
+          paddingBottom: 'max(1.5rem, env(safe-area-inset-bottom))',
+          paddingLeft: 'max(1.5rem, env(safe-area-inset-left))',
+          paddingRight: 'max(1.5rem, env(safe-area-inset-right))'
+        }}
+      >
+        {/* Header Admin */}
+        <div className="flex justify-between items-center mb-6">
           <div>
-            <p className="text-red-500 text-xs font-black uppercase tracking-widest mb-1">Panel de Trackeo</p>
-            <h2 className="text-white text-3xl font-black tracking-tight italic">PANEL ADMIN</h2>
+            <div className="flex items-center gap-2 mb-1">
+              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse-dot inline-block" />
+              <p className="text-red-500 text-xs font-black uppercase tracking-widest">Radar en vivo</p>
+            </div>
+            <h2 className="text-white text-3xl font-black tracking-tight">PANEL ADMIN</h2>
           </div>
-          <button onClick={() => setShowAdmin(false)} className="bg-white/10 p-3 rounded-2xl text-white hover:bg-white/20 transition-colors cursor-pointer">
+          <button
+            onClick={() => setShowAdmin(false)}
+            className="bg-white/10 p-3 rounded-2xl text-white hover:bg-white/20 active:scale-90 transition-all duration-150 cursor-pointer"
+            aria-label="Cerrar panel admin"
+          >
             <X size={20} />
           </button>
         </div>
 
-        <button onClick={cargarRutasEnVivo} className="mb-6 flex items-center justify-center gap-2 w-full bg-white/5 border border-white/10 py-4 rounded-2xl text-xs font-bold uppercase tracking-widest hover:bg-white/10 transition-all active:scale-95 cursor-pointer">
-          <RefreshCcw size={14} /> Actualizar Radar
+        {/* Botón actualizar */}
+        <button
+          onClick={cargarRutasEnVivo}
+          disabled={loadingAdmin}
+          className="mb-5 flex items-center justify-center gap-2 w-full bg-white/5 border border-white/10 py-4 rounded-2xl text-xs font-bold uppercase tracking-widest hover:bg-white/10 active:scale-95 transition-all duration-200 cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+        >
+          <RefreshCcw size={14} className={loadingAdmin ? 'animate-spin' : ''} />
+          {loadingAdmin ? 'Cargando...' : 'Actualizar Radar'}
         </button>
 
-        <div className="flex-1 space-y-4 overflow-y-auto pb-8">
-          {rutasVisibles.length === 0 ? (
-            <p className="text-stone-500 text-center mt-10 font-bold">No hay repartidores activos en la calle.</p>
+        {/* Estado de error */}
+        {adminError && (
+          <div className="mb-4 flex items-center gap-3 bg-red-950/60 border border-red-800 text-red-300 text-xs font-bold p-4 rounded-2xl animate-fade-in">
+            <AlertTriangle size={16} className="shrink-0 text-red-400" />
+            {adminError}
+          </div>
+        )}
+
+        {/* Lista de rutas */}
+        <div className="flex-1 space-y-4 overflow-y-auto pb-4">
+          {loadingAdmin && rutasEnVivo.length === 0 ? (
+            <div className="flex flex-col items-center justify-center mt-16 gap-4 text-stone-500">
+              <Loader2 size={32} className="animate-spin" />
+              <p className="text-sm font-bold">Conectando con el radar...</p>
+            </div>
+          ) : rutasVisibles.length === 0 ? (
+            <div className="flex flex-col items-center mt-16 text-center gap-3">
+              <div className="bg-stone-900 p-6 rounded-3xl">
+                <Truck size={40} className="text-stone-700 mb-2" />
+              </div>
+              <p className="text-stone-500 font-bold">No hay repartidores activos</p>
+              <p className="text-stone-600 text-xs font-semibold">en las últimas 48 horas</p>
+            </div>
           ) : (
             rutasVisibles.map(ruta => {
               const porcentaje = Math.round((ruta.progreso_actual / ruta.total_pedidos) * 100) || 0;
               const horasPasadas = (new Date() - new Date(ruta.ultima_actualizacion)) / (1000 * 60 * 60);
               const isStale = horasPasadas > 12;
-              
+              const isExpanded = expandedAdminId === ruta.id;
+
               return (
-                <div key={ruta.id} className={`bg-stone-900 p-6 rounded-3xl border transition-colors ${isStale ? 'border-amber-600' : 'border-white/10'}`}>
-                  <div 
-                    className="flex justify-between items-center cursor-pointer select-none" 
-                    onClick={() => setExpandedAdminId(expandedAdminId === ruta.id ? null : ruta.id)}
+                <div
+                  key={ruta.id}
+                  className={`bg-stone-900 rounded-3xl border transition-all duration-300 ${
+                    isStale ? 'border-amber-700/70' : 'border-white/8'
+                  }`}
+                >
+                  {/* Cabecera acordeón */}
+                  <div
+                    className="flex justify-between items-center cursor-pointer select-none p-5"
+                    onClick={() => setExpandedAdminId(isExpanded ? null : ruta.id)}
                   >
-                    <div>
-                      <h3 className="font-black text-lg flex items-center gap-2">
+                    <div className="flex-1 min-w-0 pr-3">
+                      <h3 className="font-black text-base flex items-center gap-2 truncate">
+                        {!isStale && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse-dot shrink-0" />}
                         {ruta.nombre_repartidor}
-                        {isStale && <Clock size={16} className="text-amber-500" />}
+                        {isStale && <Clock size={14} className="text-amber-500 shrink-0" />}
                       </h3>
-                      <p className="text-xs text-stone-400 mt-1 font-semibold uppercase tracking-wider">
-                        Progreso: {ruta.progreso_actual}/{ruta.total_pedidos} ({porcentaje}%)
-                      </p>
+
+                      {/* Barra de progreso */}
+                      <div className="mt-2.5 flex items-center gap-3">
+                        <div className="flex-1 h-1.5 bg-white/10 rounded-full overflow-hidden">
+                          <div
+                            className="h-full rounded-full transition-all duration-500"
+                            style={{
+                              width: `${porcentaje}%`,
+                              backgroundColor: porcentaje === 100 ? '#10b981' : '#ef4444'
+                            }}
+                          />
+                        </div>
+                        <span className="text-[11px] font-black text-stone-400 shrink-0">
+                          {ruta.progreso_actual}/{ruta.total_pedidos}
+                        </span>
+                      </div>
                     </div>
-                    
-                    {/* Boton X y Flecha Acordeón */}
-                    <div className="flex items-center gap-3">
-                      <ChevronDown className={`transition-transform duration-300 ${expandedAdminId === ruta.id ? 'rotate-180' : ''}`} />
+
+                    <div className="flex items-center gap-2 shrink-0">
+                      <ChevronDown
+                        size={18}
+                        className={`text-stone-500 transition-transform duration-300 ${isExpanded ? 'rotate-180' : ''}`}
+                      />
+                      {/* Botón ocultar (mantener presionado) */}
                       <button
                         onPointerDown={(e) => { e.stopPropagation(); startHide(ruta.id); }}
                         onPointerUp={(e) => { e.stopPropagation(); stopHide(); }}
                         onPointerLeave={(e) => { e.stopPropagation(); stopHide(); }}
-                        className="relative overflow-hidden bg-white/10 p-2 rounded-xl text-stone-400 active:scale-90 transition-transform shadow-sm"
+                        className="relative overflow-hidden bg-white/8 p-2 rounded-xl text-stone-500 active:scale-90 transition-transform"
                         style={{ WebkitUserSelect: 'none', touchAction: 'none' }}
+                        aria-label="Mantén para ocultar repartidor"
                       >
-                        <div className="absolute bottom-0 left-0 h-full bg-red-500 transition-all" style={{ width: hideProgress.id === ruta.id ? `${hideProgress.progress}%` : '0%' }} />
-                        <X size={16} className="relative z-10" />
+                        <div
+                          className="absolute bottom-0 left-0 h-full bg-red-500 transition-all ease-linear"
+                          style={{ width: hideProgress.id === ruta.id ? `${hideProgress.progress}%` : '0%' }}
+                        />
+                        <X size={14} className="relative z-10" />
                       </button>
                     </div>
                   </div>
-                  
-                  <div className={`overflow-hidden transition-all duration-300 ease-in-out ${expandedAdminId === ruta.id ? 'max-h-[1000px] opacity-100 mt-5 pt-5 border-t border-white/10' : 'max-h-0 opacity-0'}`}>
-                    <div className="space-y-3">
-                      {ruta.pedidos_json.map((p, i) => {
-                        const entregado = p.items.some(it => it.sacado);
-                        const horaEntrega = p.items.find(it => it.sacado)?.entrega_at;
-                        return (
-                          <div key={i} className="flex justify-between items-center bg-black/30 p-3 rounded-xl border border-white/5">
-                            <div className="min-w-0 pr-3">
-                              <p className={`text-[10px] font-black uppercase tracking-widest ${i === ruta.progreso_actual ? 'text-red-400' : 'text-stone-500'}`}>Parada {i + 1}</p>
-                              <p className="text-sm font-bold text-stone-300 truncate">{p.direccion}</p>
+
+                  {/* Detalle acordeón */}
+                  <div
+                    className={`overflow-hidden transition-all duration-300 ease-in-out ${
+                      isExpanded ? 'max-h-[1000px] opacity-100' : 'max-h-0 opacity-0'
+                    }`}
+                  >
+                    <div className="px-5 pb-5 pt-1 border-t border-white/8">
+                      <div className="space-y-2.5 mt-4">
+                        {(ruta.pedidos_json || []).map((p, i) => {
+                          const entregado = Array.isArray(p.items) && p.items.some(it => it.sacado);
+                          const horaEntrega = Array.isArray(p.items) && p.items.find(it => it.sacado)?.entrega_at;
+                          const esCurrent = i === ruta.progreso_actual;
+                          return (
+                            <div
+                              key={i}
+                              className={`flex justify-between items-center p-3 rounded-2xl border transition-colors ${
+                                esCurrent
+                                  ? 'bg-red-600/15 border-red-600/30'
+                                  : entregado
+                                    ? 'bg-emerald-950/30 border-emerald-900/20'
+                                    : 'bg-black/20 border-white/5'
+                              }`}
+                            >
+                              <div className="min-w-0 pr-3">
+                                <p className={`text-[9px] font-black uppercase tracking-widest mb-0.5 ${
+                                  esCurrent ? 'text-red-400' : entregado ? 'text-emerald-600' : 'text-stone-600'
+                                }`}>
+                                  {esCurrent ? '▶ EN CAMINO' : `Parada ${i + 1}`}
+                                </p>
+                                <p className="text-sm font-bold text-stone-300 truncate">{p.direccion}</p>
+                              </div>
+                              <div className="shrink-0 text-right">
+                                {entregado
+                                  ? <span className="text-emerald-400 font-black text-sm">{horaEntrega || '✓'}</span>
+                                  : <span className="text-stone-600 font-black text-[10px] uppercase">Pendiente</span>
+                                }
+                              </div>
                             </div>
-                            <div className="shrink-0 text-right">
-                              {entregado ? <span className="text-emerald-400 font-black text-sm">{horaEntrega || "✓"}</span> : <span className="text-stone-600 font-black text-xs uppercase">Pendiente</span>}
-                            </div>
-                          </div>
-                        );
-                      })}
+                          );
+                        })}
+                      </div>
                     </div>
                   </div>
                 </div>
@@ -495,7 +622,15 @@ function App() {
 
   if (modo === 'fin') {
     return (
-      <div className="min-h-screen bg-white flex flex-col items-center justify-center p-8 text-stone-900 overflow-hidden relative">
+      <div
+        className="min-h-screen bg-white flex flex-col items-center justify-center text-stone-900 overflow-hidden relative"
+        style={{
+          paddingTop: 'max(2rem, env(safe-area-inset-top))',
+          paddingBottom: 'max(2rem, env(safe-area-inset-bottom))',
+          paddingLeft: 'max(2rem, env(safe-area-inset-left))',
+          paddingRight: 'max(2rem, env(safe-area-inset-right))'
+        }}
+      >
         <style>{`
           @keyframes truck-cross { 
             0% { transform: translateX(-150px); } 
@@ -558,17 +693,30 @@ function App() {
 
   if (pedidos.length === 0) {
     return (
-      <div className="min-h-screen bg-stone-50 flex flex-col justify-center p-6 max-w-xl mx-auto overflow-y-auto relative">
+      <div
+        className="min-h-screen bg-stone-50 flex flex-col justify-center max-w-xl mx-auto overflow-y-auto relative"
+        style={{
+          paddingTop: 'max(1.5rem, env(safe-area-inset-top))',
+          paddingBottom: 'max(1.5rem, env(safe-area-inset-bottom))',
+          paddingLeft: 'max(1.5rem, env(safe-area-inset-left))',
+          paddingRight: 'max(1.5rem, env(safe-area-inset-right))'
+        }}
+      >
         <button
           onPointerDown={startAdmin}
           onPointerUp={stopAdmin}
           onPointerLeave={stopAdmin}
-          className="absolute top-0 right-0 w-32 h-32 flex items-start justify-end p-6 cursor-pointer opacity-100"
-          style={{ WebkitUserSelect: 'none', touchAction: 'none' }}
+          className="absolute top-0 right-0 w-28 h-28 flex items-start justify-end cursor-pointer"
+          style={{
+            paddingTop: 'max(1.25rem, env(safe-area-inset-top))',
+            paddingRight: 'max(1.25rem, env(safe-area-inset-right))',
+            WebkitUserSelect: 'none',
+            touchAction: 'none'
+          }}
         >
           <div className="relative">
-            <Zap size={24} className="text-stone-300" />
-            <div className="absolute top-8 right-0 h-1 bg-red-500 transition-all rounded-full" style={{ width: `${adminProgress}%` }} />
+            <Zap size={22} className="text-stone-300" />
+            <div className="absolute top-7 right-0 h-1 bg-red-500 transition-all duration-75 rounded-full" style={{ width: `${adminProgress}%` }} />
           </div>
         </button>
         <div className="mb-10 text-center flex flex-col items-center animate-slide-up mt-10">
@@ -614,7 +762,15 @@ function App() {
   const pedidoActual = pedidos[index] || pedidos[0];
 
   return (
-    <div className="min-h-screen bg-stone-100 p-4 sm:p-6 flex flex-col relative max-w-7xl mx-auto">
+    <div
+      className="min-h-screen bg-stone-100 flex flex-col relative max-w-7xl mx-auto"
+      style={{
+        paddingTop: 'max(1rem, env(safe-area-inset-top))',
+        paddingBottom: 'max(1rem, env(safe-area-inset-bottom))',
+        paddingLeft: 'max(1rem, env(safe-area-inset-left))',
+        paddingRight: 'max(1rem, env(safe-area-inset-right))'
+      }}
+    >
       {/* CSS GLOBAL PARA EL JIGGLE MODE (MODO IOS) */}
       <style>{`
         @keyframes jiggle {
@@ -682,23 +838,23 @@ function App() {
         </div>
       )}
 
-      <div className="flex justify-between items-center mb-5 px-1">
+      <div className="flex justify-between items-center mb-4 px-1">
         <button
           onPointerDown={startReset}
           onPointerUp={stopReset}
           onPointerLeave={stopReset}
           aria-label="Mantén presionado para reiniciar"
-          className="relative overflow-hidden bg-white text-stone-500 px-5 py-3 rounded-2xl font-bold text-xs flex items-center gap-2 active:scale-95 transition-transform select-none touch-none cursor-pointer shadow-card border border-stone-100"
+          className="relative overflow-hidden bg-white text-stone-500 px-5 py-3 rounded-2xl font-bold text-xs flex items-center gap-2 active:scale-95 transition-all duration-150 select-none touch-none cursor-pointer shadow-card border border-stone-100"
           style={{ WebkitUserSelect: 'none' }}
         >
-          <div className="absolute bottom-0 left-0 h-[3px] bg-red-500 transition-all rounded-full" style={{ width: `${resetProgress}%` }} />
-          <RefreshCcw size={14} />
+          <div className="absolute bottom-0 left-0 h-[3px] bg-red-500 transition-all duration-75 rounded-full" style={{ width: `${resetProgress}%` }} />
+          <RefreshCcw size={14} className={resetProgress > 0 ? 'animate-spin' : ''} />
           <span className="tracking-wider">{resetProgress > 0 ? 'MANTÉN...' : 'REINICIAR'}</span>
         </button>
 
         <button
           onClick={() => setShowReorder(true)}
-          className="bg-stone-900 text-white px-5 py-3 rounded-2xl font-bold text-xs flex items-center gap-2 active:scale-95 transition-transform shadow-dark cursor-pointer"
+          className="bg-stone-900 text-white px-5 py-3 rounded-2xl font-bold text-xs flex items-center gap-2 active:scale-95 transition-all duration-150 shadow-dark cursor-pointer hover:bg-stone-800"
         >
           <ListOrdered size={14} />
           <span className="tracking-wider">COLA DE REPARTO</span>
@@ -769,9 +925,24 @@ function App() {
         </div>
       )}
 
-      <div className="bg-white p-1.5 rounded-2xl flex mb-5 shadow-card border border-stone-100 shrink-0">
-        <button onClick={() => setModo('carga')} className={`flex-1 py-3.5 rounded-xl font-black text-xs sm:text-sm transition-all duration-200 cursor-pointer ${modo === 'carga' ? 'bg-red-600 text-white shadow-cta scale-[1.02]' : 'text-stone-400 hover:text-stone-600'}`}>1 · CHECK-IN</button>
-        <button onClick={intentarComenzarRuta} disabled={!todoCargado} className={`flex-1 py-3.5 rounded-xl font-black text-xs sm:text-sm transition-all duration-200 cursor-pointer ${modo === 'reparto' ? 'bg-red-600 text-white shadow-cta scale-[1.02]' : 'text-stone-400 hover:text-stone-600 disabled:opacity-30 disabled:cursor-not-allowed'}`}>2 · EN RUTA</button>
+      <div className="bg-white p-1.5 rounded-2xl flex mb-4 shadow-card border border-stone-100 shrink-0">
+        <button
+          onClick={() => setModo('carga')}
+          className={`flex-1 py-3.5 rounded-xl font-black text-xs sm:text-sm transition-all duration-200 cursor-pointer ${
+            modo === 'carga' ? 'bg-red-600 text-white shadow-cta scale-[1.02]' : 'text-stone-400 hover:text-stone-700'
+          }`}
+        >
+          1 · CHECK-IN
+        </button>
+        <button
+          onClick={intentarComenzarRuta}
+          disabled={!todoCargado}
+          className={`flex-1 py-3.5 rounded-xl font-black text-xs sm:text-sm transition-all duration-200 cursor-pointer ${
+            modo === 'reparto' ? 'bg-red-600 text-white shadow-cta scale-[1.02]' : 'text-stone-400 hover:text-stone-700 disabled:opacity-30 disabled:cursor-not-allowed'
+          }`}
+        >
+          2 · EN RUTA
+        </button>
       </div>
 
       <div className="flex-1 bg-white rounded-[2.5rem] p-6 sm:p-8 shadow-card card-accent-top flex flex-col relative animate-slide-up">
@@ -853,8 +1024,12 @@ function App() {
 
             {modo === 'reparto' && (
               <>
-                <button onClick={() => abrirMapa(pedidoActual.direccion)} className="w-full bg-stone-900 text-white h-[60px] rounded-2xl font-black flex justify-center items-center gap-3 active:scale-[0.97] transition-all text-sm shadow-dark cursor-pointer">
-                  <Map size={20} /> NAVEGAR CON MAPS
+                <button
+                  onClick={() => abrirMapa(pedidoActual.direccion)}
+                  className="w-full bg-stone-900 text-white h-[60px] rounded-2xl font-black flex justify-center items-center gap-3 active:scale-[0.97] transition-all duration-200 text-sm shadow-dark cursor-pointer hover:bg-stone-800 group"
+                >
+                  <Map size={20} className="group-active:scale-110 transition-transform duration-150" />
+                  NAVEGAR CON MAPS
                 </button>
 
                 <div className="bg-stone-50 p-5 rounded-3xl border-2 border-stone-100">
@@ -869,11 +1044,18 @@ function App() {
                     </div>
 
                     {pedidoActual.telefono ? (
-                      <button onClick={enviarAvisoCliente} disabled={!eta} className="flex-1 bg-[#25D366] text-white font-black h-[52px] rounded-2xl active:scale-[0.97] flex items-center justify-center text-xs gap-2 shadow-wa disabled:opacity-40 cursor-pointer tracking-wider">
+                      <button
+                        onClick={enviarAvisoCliente}
+                        disabled={!eta}
+                        className="flex-1 bg-[#25D366] text-white font-black h-[52px] rounded-2xl active:scale-[0.97] transition-all duration-150 flex items-center justify-center text-xs gap-2 shadow-wa disabled:opacity-40 disabled:saturate-0 cursor-pointer tracking-wider hover:brightness-105"
+                      >
                         <MessageCircle size={15} /> AVISAR SALIDA
                       </button>
                     ) : (
-                      <button onClick={pedirTelefonoAdmin} className="flex-1 bg-stone-800 text-white font-black h-[52px] rounded-2xl active:scale-[0.97] flex items-center justify-center text-[10px] sm:text-xs gap-2 shadow-dark cursor-pointer tracking-wider">
+                      <button
+                        onClick={pedirTelefonoAdmin}
+                        className="flex-1 bg-stone-800 text-white font-black h-[52px] rounded-2xl active:scale-[0.97] transition-all duration-150 flex items-center justify-center text-[10px] sm:text-xs gap-2 shadow-dark cursor-pointer tracking-wider hover:bg-stone-700"
+                      >
                         <MessageCircle size={15} /> PEDIR TELÉFONO
                       </button>
                     )}

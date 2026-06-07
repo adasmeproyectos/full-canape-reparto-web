@@ -1,20 +1,50 @@
-@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@500;700;900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Montserrat:wght@500;600;700;900&display=swap');
 @import "tailwindcss";
+
+/* =============================================
+   FULL CANAPÉ — DESIGN SYSTEM v2.1
+   Paleta: Stone neutrals + Red corp + Emerald ok
+   Fuente: Montserrat (500/600/700/900)
+   Safe areas: env(safe-area-inset-*)
+   ============================================= */
 
 @layer base {
   *, *::before, *::after {
     font-family: 'Montserrat', system-ui, sans-serif;
+    box-sizing: border-box;
   }
+
+  html {
+    /* Fondo raíz siempre stone-50 para evitar flashes blancos */
+    background-color: #f5f5f4;
+    /* Safe area support en nivel root */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
   body {
     background-color: #f5f5f4;
+    /* Compensamos el padding del html para que el fondo cubra todo */
+    margin: 0;
+    min-height: 100dvh;
+    /* Suavizamos el renderizado de texto en pantallas de alta densidad */
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
   }
+
   * {
+    /* Quitar el highlight azul/gris en tap en móvil */
     -webkit-tap-highlight-color: transparent;
   }
 }
 
 @layer components {
-  /* Sombra premium multicapa para tarjetas */
+  /* ── Sombras del sistema ── */
+
+  /* Tarjeta estándar: sutil, multicapa */
   .shadow-card {
     box-shadow:
       0 1px 2px rgba(0,0,0,0.04),
@@ -22,16 +52,16 @@
       0 12px 24px rgba(0,0,0,0.08),
       0 0 0 1px rgba(0,0,0,0.03);
   }
-  
-  /* Sombra para botones CTA */
+
+  /* CTA Rojo: botón de acción principal */
   .shadow-cta {
     box-shadow:
       0 2px 4px rgba(220,38,38,0.2),
       0 8px 20px rgba(220,38,38,0.3),
       0 0 0 1px rgba(220,38,38,0.1);
   }
-  
-  /* Sombra para botones oscuros */
+
+  /* Botones oscuros: stone-900 */
   .shadow-dark {
     box-shadow:
       0 2px 4px rgba(0,0,0,0.15),
@@ -39,29 +69,63 @@
       0 0 0 1px rgba(0,0,0,0.08);
   }
 
-  /* Sombra para botones WhatsApp */
+  /* WhatsApp verde */
   .shadow-wa {
     box-shadow:
       0 2px 4px rgba(37,211,102,0.2),
       0 6px 14px rgba(37,211,102,0.25);
   }
 
-  /* Borde superior de tarjeta principal */
+  /* Emerald: botón listo/éxito */
+  .shadow-emerald {
+    box-shadow:
+      0 2px 4px rgba(16,185,129,0.2),
+      0 8px 20px rgba(16,185,129,0.3),
+      0 0 0 1px rgba(16,185,129,0.08);
+  }
+
+  /* Borde superior rojo corporativo */
   .card-accent-top {
     border-top: 5px solid #dc2626;
+  }
+
+  /* ── Utilidades de layout seguro (Safe Area) ── */
+
+  /* Padding superior respetando el notch / Dynamic Island */
+  .pt-safe {
+    padding-top: max(1.5rem, env(safe-area-inset-top));
+  }
+
+  /* Padding inferior respetando la home bar de iPhone */
+  .pb-safe {
+    padding-bottom: max(1rem, env(safe-area-inset-bottom));
+  }
+
+  /* Padding lateral para islas de esquina */
+  .px-safe {
+    padding-left: max(1rem, env(safe-area-inset-left));
+    padding-right: max(1rem, env(safe-area-inset-right));
   }
 }
 
 @layer utilities {
+  /* ── Animaciones de entrada ── */
   .animate-slide-up {
     animation: slideUp 0.35s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
   .animate-pop-in {
     animation: popIn 0.4s cubic-bezier(0.16, 1, 0.3, 1) both;
   }
+  .animate-fade-in {
+    animation: fadeIn 0.3s ease-out both;
+  }
+  /* Pulso de estado activo para indicadores en vivo */
+  .animate-pulse-dot {
+    animation: pulseDot 2s ease-in-out infinite;
+  }
 }
 
-/* Animaciones personalizadas */
+/* ── Keyframes ── */
 @keyframes slideUp {
   from { opacity: 0; transform: translateY(16px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -72,14 +136,36 @@
   to   { opacity: 1; transform: scale(1); }
 }
 
-/* Detalles de UI Custom */
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+@keyframes pulseDot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50%       { opacity: 0.5; transform: scale(0.8); }
+}
+
+/* ── Scrollbar personalizado (webkit) ── */
+::-webkit-scrollbar        { width: 4px; height: 4px; }
+::-webkit-scrollbar-track  { background: transparent; }
+::-webkit-scrollbar-thumb  { background: #d6d3d1; border-radius: 99px; }
+::-webkit-scrollbar-thumb:hover { background: #a8a29e; }
+
+/* ── Inputs y checkboxes ── */
 input[type="checkbox"] { cursor: pointer; }
 
-button:focus-visible, input:focus-visible, label:focus-visible {
+/* ── Focus ring accesible (rojo corporativo) ── */
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+label:focus-visible,
+a:focus-visible {
   outline: 3px solid #dc2626;
   outline-offset: 2px;
 }
 
-::-webkit-scrollbar { width: 4px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: #d6d3d1; border-radius: 99px; }
+/* ── Prevenir scroll horizontal fantasma en iOS ── */
+body, #root {
+  overflow-x: hidden;
+}
