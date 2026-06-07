@@ -4,7 +4,7 @@ import { supabase } from './lib/supabase';
 import { 
   ChevronLeft, ChevronRight, Package, MapPin, Loader2, CheckCircle2, 
   Map, Zap, Truck, Home, Phone, MessageCircle, RefreshCcw, ListOrdered, 
-  X, ArrowUp, ArrowDown, AlertTriangle, Pencil, Save, Clock, ChevronDown 
+  X, ArrowUp, ArrowDown, AlertTriangle, Pencil, Save, Clock, ChevronDown, Trash2
 } from 'lucide-react';
 
 const getMemoria = (clave, valorPorDefecto) => {
@@ -114,12 +114,9 @@ function App() {
     setLoadingAdmin(true);
     setAdminError(null);
     try {
-      // Filtramos estrictamente las últimas 48h para evitar timeouts
-      // y solicitamos solo las columnas necesarias (no SELECT *)
       const fechaLimite = new Date();
       fechaLimite.setHours(fechaLimite.getHours() - 48);
 
-      // AbortController para cortar la consulta si tarda más de 8 segundos
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 8000);
 
@@ -135,22 +132,47 @@ function App() {
       clearTimeout(timeoutId);
 
       if (error) {
-        console.error("❌ Error radar:", error.message);
-        setAdminError("Error al cargar datos. Intenta de nuevo.");
+        console.error('❌ Error radar:', error.message);
+        setAdminError('Error al cargar datos. Intenta de nuevo.');
       } else if (data) {
-        console.log(`✅ Radar: ${data.length} ruta(s) activa(s) recibidas.`);
-        setRutasEnVivo(data);
+        // ── DEDUPLICACIÓN: si un mismo nombre_repartidor tiene varias filas
+        // (por recargas que generaron nuevos sessionId), conservamos solo
+        // la fila con ultima_actualizacion más reciente por cada nombre.
+        const mapaDeduplicado = new Map();
+        for (const ruta of data) {
+          const clave = ruta.nombre_repartidor;
+          if (!mapaDeduplicado.has(clave)) {
+            mapaDeduplicado.set(clave, ruta);
+          } else {
+            const existente = mapaDeduplicado.get(clave);
+            if (new Date(ruta.ultima_actualizacion) > new Date(existente.ultima_actualizacion)) {
+              mapaDeduplicado.set(clave, ruta);
+            }
+          }
+        }
+        const deduplicados = Array.from(mapaDeduplicado.values());
+        console.log(`✅ Radar: ${deduplicados.length} repartidor(es) único(s) activo(s).`);
+        setRutasEnVivo(deduplicados);
       }
     } catch(e) {
       if (e.name === 'AbortError') {
-        setAdminError("Tiempo de espera agotado. Verifica tu conexión.");
+        setAdminError('Tiempo de espera agotado. Verifica tu conexión.');
       } else {
-        setAdminError("Error de red inesperado.");
+        setAdminError('Error de red inesperado.');
       }
-      console.error("❌ Error cargarRutasEnVivo:", e);
+      console.error('❌ Error cargarRutasEnVivo:', e);
     } finally {
       setLoadingAdmin(false);
     }
+  };
+
+  // Limpia el panel local: borra el estado en pantalla y el mapa de ocultos
+  // para dejar el radar en blanco y listo para una nueva jornada.
+  const limpiarRadar = () => {
+    setRutasEnVivo([]);
+    setHiddenRutas({});
+    setExpandedAdminId(null);
+    setAdminError(null);
   };
 
   const startAdmin = () => {
@@ -322,14 +344,13 @@ function App() {
   };
 
   const enviarAvisoCliente = () => {
-    const min  = eta || "unos";
-    const texto = `¡Hola! 🥨 Le habla el repartidor de Full Canapé. Ya voy en camino a su dirección. Llego aproximadamente en ${min} minutos. ¡Nos vemos pronto! 🚚✨`;
-    window.open(`https://wa.me/${pedidoActual.telefono}?text=${encodeURIComponent(texto)}`, '_blank');
+    // Chat abierto vacío: el repartidor escribe libremente con las herramientas nativas de WA
+    window.open(`https://wa.me/${pedidoActual.telefono}`, '_blank');
   };
 
   const enviarAvisoLlegada = () => {
-    const texto = `¡Hola! 👋 Ya estoy llegando a su domicilio. Por favor, esté atento/a para recibir su pedido. ¡Muchas gracias! 🚚✨`;
-    window.open(`https://wa.me/${pedidoActual.telefono}?text=${encodeURIComponent(texto)}`, '_blank');
+    // Chat abierto vacío: el repartidor escribe libremente
+    window.open(`https://wa.me/${pedidoActual.telefono}`, '_blank');
   };
 
   const avisarAdmin = () => {
@@ -503,7 +524,8 @@ function App() {
               <p className="text-stone-600 text-xs font-semibold">en las últimas 48 horas</p>
             </div>
           ) : (
-            rutasVisibles.map(ruta => {
+            <>
+              {rutasVisibles.map(ruta => {
               const porcentaje = Math.round((ruta.progreso_actual / ruta.total_pedidos) * 100) || 0;
               const horasPasadas = (new Date() - new Date(ruta.ultima_actualizacion)) / (1000 * 60 * 60);
               const isStale = horasPasadas > 12;
@@ -527,6 +549,10 @@ function App() {
                         {ruta.nombre_repartidor}
                         {isStale && <Clock size={14} className="text-amber-500 shrink-0" />}
                       </h3>
+                      {/* ID corto visible: permite al admin identificar duplicados de forma inmediata */}
+                      <p className="text-[9px] font-mono text-stone-600 mt-0.5 truncate">
+                        ID: {String(ruta.id).substring(0, 10)}…
+                      </p>
 
                       {/* Barra de progreso */}
                       <div className="mt-2.5 flex items-center gap-3">
@@ -613,7 +639,20 @@ function App() {
                   </div>
                 </div>
               );
-            })
+            })}
+
+              {/* ── Botón Limpiar Todo ── */}
+              <div className="pt-2 pb-2">
+                <button
+                  onClick={limpiarRadar}
+                  className="w-full flex items-center justify-center gap-2.5 py-4 rounded-2xl border border-dashed border-stone-700 text-stone-500 text-xs font-black uppercase tracking-widest hover:border-red-800 hover:text-red-400 hover:bg-red-950/20 active:scale-[0.97] transition-all duration-200 cursor-pointer group"
+                  aria-label="Limpiar todos los repartidores del radar"
+                >
+                  <Trash2 size={14} className="group-hover:text-red-400 transition-colors" />
+                  Limpiar todo
+                </button>
+              </div>
+            </>
           )}
         </div>
       </div>
