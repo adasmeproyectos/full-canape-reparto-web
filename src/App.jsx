@@ -1,10 +1,18 @@
-import { useState, useRef, useEffect } from 'react';
+import { useState, useRef, useEffect, useCallback } from 'react';
 import { procesarPedidos } from './lib/gemini';
 import { supabase } from './lib/supabase';
+import {
+  registrarServiceWorker,
+  solicitarPermisoPush,
+  suscribirAdmin,
+  dispararNotificacionPush,
+  pushEsSoportado
+} from './lib/push';
 import { 
   ChevronLeft, ChevronRight, Package, MapPin, Loader2, CheckCircle2, 
   Map, Zap, Truck, Home, Phone, MessageCircle, RefreshCcw, ListOrdered, 
-  X, ArrowUp, ArrowDown, AlertTriangle, Pencil, Save, Clock, ChevronDown, Trash2
+  X, ArrowUp, ArrowDown, AlertTriangle, Pencil, Save, Clock, ChevronDown,
+  Trash2, Bell, BellOff
 } from 'lucide-react';
 
 const getMemoria = (clave, valorPorDefecto) => {
@@ -61,6 +69,11 @@ function App() {
   const [adminError, setAdminError] = useState(null);
   const adminTimer = useRef(null);
 
+  // --- ESTADOS WEB PUSH ---
+  // 'idle' | 'requesting' | 'granted' | 'denied' | 'unsupported'
+  const [pushEstado, setPushEstado] = useState('idle');
+  const pushInicializado = useRef(false);
+
   useEffect(() => {
     localStorage.setItem('fc_input',        JSON.stringify(input));
     localStorage.setItem('fc_pedidos',      JSON.stringify(pedidos));
@@ -70,6 +83,25 @@ function App() {
     localStorage.setItem('fc_eta',          JSON.stringify(eta));
     localStorage.setItem('fc_hidden_rutas', JSON.stringify(hiddenRutas));
   }, [input, pedidos, historial, index, modo, eta, hiddenRutas]);
+
+  // --- REGISTRO DEL SERVICE WORKER AL MONTAR ---
+  // Se ejecuta una sola vez. Detecta si hay permiso previo concedido
+  // para actualizar el estado sin volver a pedir permiso al usuario.
+  useEffect(() => {
+    if (pushInicializado.current) return;
+    pushInicializado.current = true;
+
+    if (!pushEsSoportado()) {
+      setPushEstado('unsupported');
+      return;
+    }
+    // Registrar el SW siempre (necesario aunque no haya permiso aún)
+    registrarServiceWorker();
+    // Reflejar el permiso actual sin disparar ningún dialog
+    const permisoActual = Notification.permission;
+    if (permisoActual === 'granted') setPushEstado('granted');
+    else if (permisoActual === 'denied') setPushEstado('denied');
+  }, []);
 
   // --- LÓGICA DE SINCRONIZACIÓN EN LA NUBE ---
   const sincronizarConNube = async () => {
@@ -243,6 +275,21 @@ function App() {
     }
   };
 
+  // --- ACTIVAR NOTIFICACIONES PUSH (para el admin) ---
+  const activarPush = async () => {
+    if (pushEstado === 'requesting') return;
+    setPushEstado('requesting');
+    const permiso = await solicitarPermisoPush();
+    if (permiso === 'granted') {
+      await suscribirAdmin();
+      setPushEstado('granted');
+    } else if (permiso === 'denied') {
+      setPushEstado('denied');
+    } else {
+      setPushEstado('idle');
+    }
+  };
+
   const startReset = () => {
     resetTimer.current = setInterval(() => {
       setResetProgress(prev => {
@@ -344,12 +391,18 @@ function App() {
   };
 
   const enviarAvisoCliente = () => {
-    // Chat abierto vacío: el repartidor escribe libremente con las herramientas nativas de WA
-    window.open(`https://wa.me/${pedidoActual.telefono}`, '_blank');
+    const min = eta || 'unos';
+    const texto = `¡Hola! 🥨 Le habla el repartidor de Full Canapé. Ya voy en camino a su dirección. Llego aproximadamente en ${min} minutos. ¡Nos vemos pronto! 🚚✨`;
+    window.open(`https://wa.me/${pedidoActual.telefono}?text=${encodeURIComponent(texto)}`, '_blank');
   };
 
   const enviarAvisoLlegada = () => {
-    // Chat abierto vacío: el repartidor escribe libremente
+    const texto = `¡Hola! 👋 Ya estoy llegando a su domicilio. Por favor, esté atento/a para recibir su pedido. ¡Muchas gracias! 🚚✨`;
+    window.open(`https://wa.me/${pedidoActual.telefono}?text=${encodeURIComponent(texto)}`, '_blank');
+  };
+
+  // Abre el chat de WhatsApp sin texto predefinido para escritura libre.
+  const abrirChatVacio = () => {
     window.open(`https://wa.me/${pedidoActual.telefono}`, '_blank');
   };
 
@@ -377,8 +430,32 @@ function App() {
     setPedidos(n);
   };
   
-  const cambiarAModoReparto = () => { setIndex(0); setEta(""); setModo('reparto'); };
-  const avanzar   = () => setIndex(i => Math.min(pedidos.length - 1, i + 1));
+  const cambiarAModoReparto = () => {
+    setIndex(0); setEta(''); setModo('reparto');
+    // Notificar al admin que la ruta acaba de comenzar
+    if (pedidos.length > 0) {
+      dispararNotificacionPush(
+        '🚚 Ruta iniciada — Full Canapé',
+        `Repartidor en camino a la 1ª parada: ${pedidos[0]?.direccion || ''}`
+      );
+    }
+  };
+  const avanzar = () => {
+    const indexActual = index; // captura el valor antes de actualizar
+    setIndex(i => {
+      const siguiente = Math.min(pedidos.length - 1, i + 1);
+      // Solo disparar si efectivamente avanza (no está en el último)
+      if (siguiente > i) {
+        const dirAnterior = pedidos[i]?.direccion || 'dirección anterior';
+        const dirSiguiente = pedidos[siguiente]?.direccion || '';
+        const mensaje = dirSiguiente
+          ? `Entregado en ${dirAnterior}. En camino a: ${dirSiguiente}`
+          : `Entregado en ${dirAnterior}. ¡Última parada completada!`;
+        dispararNotificacionPush('📦 Entrega registrada — Full Canapé', mensaje);
+      }
+      return siguiente;
+    });
+  };
   const retroceder = () => setIndex(i => Math.max(0, i - 1));
   const todoCargado = pedidos.length > 0 && pedidos.every(p => p.items.every(it => it.marcado));
 
@@ -793,6 +870,34 @@ function App() {
               <RefreshCcw size={16} /> RESTAURAR ÚLTIMA CARGA
             </button>
           )}
+
+          {/* Botón de activación de alertas push (solo visible si el dispositivo las soporta) */}
+          {pushEstado !== 'unsupported' && (
+            <button
+              onClick={activarPush}
+              disabled={pushEstado === 'requesting' || pushEstado === 'denied'}
+              className={`h-[52px] rounded-3xl font-bold text-sm flex items-center justify-center gap-2.5 transition-all duration-200 cursor-pointer border-2 ${
+                pushEstado === 'granted'
+                  ? 'bg-emerald-50 border-emerald-200 text-emerald-700 cursor-default'
+                  : pushEstado === 'denied'
+                  ? 'bg-stone-50 border-stone-200 text-stone-400 cursor-not-allowed'
+                  : pushEstado === 'requesting'
+                  ? 'bg-stone-50 border-stone-200 text-stone-400 cursor-wait'
+                  : 'bg-stone-50 border-stone-200 text-stone-600 hover:border-stone-300 hover:bg-stone-100 active:scale-[0.97]'
+              }`}
+              aria-label="Activar notificaciones push para el administrador"
+            >
+              {pushEstado === 'granted' ? (
+                <><Bell size={16} className="text-emerald-600" /> Alertas activas</>
+              ) : pushEstado === 'denied' ? (
+                <><BellOff size={16} /> Alertas bloqueadas en ajustes</>
+              ) : pushEstado === 'requesting' ? (
+                <><Loader2 size={16} className="animate-spin" /> Activando...</>
+              ) : (
+                <><Bell size={16} /> Activar alertas al admin</>
+              )}
+            </button>
+          )}
         </div>
       </div>
     );
@@ -1102,11 +1207,29 @@ function App() {
 
                   <div className="flex gap-2">
                     {pedidoActual.telefono && (
-                      <button onClick={enviarAvisoLlegada} className="flex-1 bg-white border-2 border-[#25D366] text-[#25D366] font-black py-3 rounded-xl text-xs active:scale-95 cursor-pointer tracking-wider">
+                      <button
+                        onClick={enviarAvisoLlegada}
+                        className="flex-1 bg-white border-2 border-[#25D366] text-[#25D366] font-black py-3 rounded-xl text-xs active:scale-95 transition-all duration-150 cursor-pointer tracking-wider hover:bg-[#25D366]/5"
+                      >
                         ESTOY AFUERA
                       </button>
                     )}
-                    <button onClick={avisarAdmin} className="flex-1 bg-stone-200 text-stone-700 font-black py-3 rounded-xl text-xs border border-stone-300 active:scale-95 cursor-pointer tracking-wider">
+                    {/* Chat vacío: para que el repartidor escriba libremente */}
+                    {pedidoActual.telefono && (
+                      <button
+                        onClick={abrirChatVacio}
+                        title="Abrir chat de WhatsApp vacío"
+                        className="bg-white border-2 border-stone-300 text-stone-500 font-black py-3 px-3 rounded-xl text-xs active:scale-95 transition-all duration-150 cursor-pointer hover:border-stone-400 hover:text-stone-700 flex items-center gap-1.5 shrink-0"
+                        aria-label="Abrir chat vacío en WhatsApp"
+                      >
+                        <MessageCircle size={14} />
+                        <span className="tracking-wider">LIBRE</span>
+                      </button>
+                    )}
+                    <button
+                      onClick={avisarAdmin}
+                      className="flex-1 bg-stone-200 text-stone-700 font-black py-3 rounded-xl text-xs border border-stone-300 active:scale-95 transition-all duration-150 cursor-pointer tracking-wider hover:bg-stone-300"
+                    >
                       INFORMAR ADMIN
                     </button>
                   </div>
