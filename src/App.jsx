@@ -52,6 +52,11 @@ function App() {
   const [animatingMover, setAnimatingMover] = useState(null);
   const [expandedAdminId, setExpandedAdminId] = useState(null);
 
+  // --- ESTADO DE TRANSICIÓN DE TARJETA ---
+  // Cuando el índice cambia, se pone en false (invisible) durante
+  // 180ms para que el CSS genere el fade+slide de salida/entrada.
+  const [slideVisible, setSlideVisible] = useState(true);
+
   // --- ESTADOS ADMIN "FILTRO FANTASMA" ---
   const [hiddenRutas, setHiddenRutas] = useState(() => getMemoria('fc_hidden_rutas', {}));
   const [hideProgress, setHideProgress] = useState({ id: null, progress: 0 });
@@ -102,6 +107,17 @@ function App() {
     if (permisoActual === 'granted') setPushEstado('granted');
     else if (permisoActual === 'denied') setPushEstado('denied');
   }, []);
+
+  // --- TRANSICIÓN SUAVE AL CAMBIAR DE PEDIDO ---
+  // Cuando `index` cambia: oscurece y desplaza la tarjeta 180ms,
+  // luego la devuelve a su estado visible. Respeta prefers-reduced-motion.
+  useEffect(() => {
+    const prefReducida = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (prefReducida) return; // sin movimiento si el usuario lo pidió
+    setSlideVisible(false);
+    const t = setTimeout(() => setSlideVisible(true), 180);
+    return () => clearTimeout(t);
+  }, [index]);
 
   // --- LÓGICA DE SINCRONIZACIÓN EN LA NUBE ---
   const sincronizarConNube = async () => {
@@ -417,7 +433,17 @@ function App() {
 
   const abrirMapa = (dir) => window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(dir)}`, '_blank');
   
-  const finalizarRuta = () => { setAbsorbiendo(true); setTimeout(() => { setModo('fin'); setAbsorbiendo(false); }, 800); };
+  const finalizarRuta = () => {
+    // Notificación push de cierre de ruta: se dispara antes de la animación
+    // para que el admin reciba el aviso aunque la app quede en segundo plano.
+    const ultimaDireccion = pedidos[pedidos.length - 1]?.direccion || '';
+    dispararNotificacionPush(
+      '✅ Ruta completada — Full Canapé',
+      `Última entrega en ${ultimaDireccion}. ¡Ruta terminada con éxito!`
+    );
+    setAbsorbiendo(true);
+    setTimeout(() => { setModo('fin'); setAbsorbiendo(false); }, 800);
+  };
   
   const toggleCaja  = (i) => {
     const n = [...pedidos];
@@ -441,11 +467,11 @@ function App() {
     }
   };
   const avanzar = () => {
-    const indexActual = index; // captura el valor antes de actualizar
     setIndex(i => {
       const siguiente = Math.min(pedidos.length - 1, i + 1);
-      // Solo disparar si efectivamente avanza (no está en el último)
-      if (siguiente > i) {
+      // Push SOLO en modo calle. El check-in es privado del repartidor:
+      // navegar entre pedidos con las flechas no debe notificar al admin.
+      if (siguiente > i && modo === 'reparto') {
         const dirAnterior = pedidos[i]?.direccion || 'dirección anterior';
         const dirSiguiente = pedidos[siguiente]?.direccion || '';
         const mensaje = dirSiguiente
@@ -464,6 +490,7 @@ function App() {
       onPointerDown={() => {
         setPresionando(true);
         pressTimer.current = setTimeout(() => {
+          // 1. Marcar todos los ítems del pedido actual
           const n = [...pedidos];
           n[index].items.forEach(it => {
             if (modo === 'carga') {
@@ -473,7 +500,15 @@ function App() {
               it.entrega_at = new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
             }
           });
-          setPedidos(n); setPresionando(false);
+          setPedidos(n);
+          setPresionando(false);
+          // 2. Auto-avanzar SOLO en modo reparto y si no es el último pedido.
+          //    350ms de pausa da feedback visual de "todo marcado" antes de saltar.
+          //    En check-in no avanza: el repartidor carga pedido a pedido y
+          //    decide él cuándo pasar al siguiente.
+          if (modo === 'reparto' && index < pedidos.length - 1) {
+            setTimeout(() => { avanzar(); setEta(''); }, 350);
+          }
         }, 800);
       }}
       onPointerUp={() => { setPresionando(false); clearTimeout(pressTimer.current); }}
@@ -1099,7 +1134,16 @@ function App() {
           <button onClick={avanzar} disabled={index === pedidos.length - 1} aria-label="Parada siguiente" className="w-14 h-14 flex items-center justify-center bg-white text-stone-700 rounded-xl shadow-card disabled:opacity-25 active:scale-90 transition-all duration-150 cursor-pointer border border-stone-100"><ChevronRight size={26} strokeWidth={2.5} /></button>
         </div>
 
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 lg:gap-10 flex-1">
+        {/* Envuelve todo el contenido dinámico (cliente, dirección, items) en una
+            capa de transición. slideVisible se pone en false 180ms cuando index
+            cambia, forzando el fade-out+slide-out antes del nuevo contenido. */}
+        <div
+          className={`grid grid-cols-1 lg:grid-cols-2 gap-6 lg:gap-10 flex-1 transition-all duration-300 ease-out ${
+            slideVisible
+              ? 'opacity-100 translate-x-0'
+              : 'opacity-0 translate-x-3'
+          }`}
+        >
           <div className="flex flex-col gap-5">
             
             {/* INICIO BLOQUE: LÁPIZ Y DATOS DEL CLIENTE */}
@@ -1254,10 +1298,48 @@ function App() {
               {pedidoActual.items.map((it, i) => {
                 const activo = modo === 'carga' ? it.marcado : it.sacado;
                 return (
-                  <label key={i} className={`flex items-center p-5 rounded-2xl border-2 transition-all duration-200 cursor-pointer ${modo === 'carga' ? activo ? 'bg-emerald-50 border-emerald-200' : 'bg-white border-stone-200 shadow-card hover:border-stone-300' : activo ? 'bg-red-50 border-red-200' : 'bg-white border-stone-200 shadow-card hover:border-stone-300'}`}>
-                    <input type="checkbox" checked={activo} onChange={() => toggleCaja(i)} className={`w-7 h-7 rounded-lg border-2 mr-4 shrink-0 ${modo === 'carga' ? 'accent-emerald-500' : 'accent-red-600'}`} />
-                    <span className={`text-base sm:text-lg font-bold leading-tight transition-all ${activo ? 'line-through opacity-50' : 'text-stone-800'}`}>{it.nombre}</span>
-                    {activo && <CheckCircle2 size={18} className={`ml-auto shrink-0 ${modo === 'carga' ? 'text-emerald-500' : 'text-red-400'}`} />}
+                  // duration-300 + scale micro-feedback: al marcar, la tarjeta
+                  // se "aplasta" levemente (scale-[0.98]) antes de su color nuevo,
+                  // dando sensación táctil continua y premium.
+                  <label
+                    key={i}
+                    className={`
+                      flex items-center p-5 rounded-2xl border-2
+                      transition-all duration-300 ease-out cursor-pointer
+                      ${
+                        modo === 'carga'
+                          ? activo
+                            ? 'bg-emerald-50 border-emerald-200 scale-[1.00]'
+                            : 'bg-white border-stone-200 shadow-card hover:border-stone-300 scale-[1.00]'
+                          : activo
+                            ? 'bg-red-50 border-red-200 scale-[1.00]'
+                            : 'bg-white border-stone-200 shadow-card hover:border-stone-300 scale-[1.00]'
+                      }
+                    `}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={activo}
+                      onChange={() => toggleCaja(i)}
+                      className={`w-7 h-7 rounded-lg border-2 mr-4 shrink-0 ${
+                        modo === 'carga' ? 'accent-emerald-500' : 'accent-red-600'
+                      }`}
+                    />
+                    <span
+                      className={`text-base sm:text-lg font-bold leading-tight transition-all duration-300 ${
+                        activo ? 'line-through opacity-40' : 'text-stone-800'
+                      }`}
+                    >
+                      {it.nombre}
+                    </span>
+                    {activo && (
+                      <CheckCircle2
+                        size={18}
+                        className={`ml-auto shrink-0 transition-all duration-300 ${
+                          modo === 'carga' ? 'text-emerald-500' : 'text-red-400'
+                        }`}
+                      />
+                    )}
                   </label>
                 );
               })}
