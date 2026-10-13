@@ -8,6 +8,8 @@ import {
   dispararNotificacionPush,
   pushEsSoportado
 } from './lib/push';
+import { sanitizarTelefonoChileno, formatearTelefonoVisual } from './lib/sanitizer';
+import { abrirWhatsApp, abrirNavegacion, dispararHaptico } from './lib/handoff';
 import { 
   ChevronLeft, ChevronRight, Package, MapPin, Loader2, CheckCircle2, 
   Map, Zap, Truck, Home, Phone, MessageCircle, RefreshCcw, ListOrdered, 
@@ -24,74 +26,98 @@ const getMemoria = (clave, valorPorDefecto) => {
   }
 };
 
+const guardarMemoria = (clave, valor) => {
+  try {
+    localStorage.setItem(clave, JSON.stringify(valor));
+  } catch {
+    // Protección contra fallos de almacenamiento o cuota en navegador privado
+  }
+};
+
 function App() {
-  const [input, setInput]           = useState(() => getMemoria('fc_input', ""));
-  const [pedidos, setPedidos]       = useState(() => getMemoria('fc_pedidos', []));
-  const [historial, setHistorial]   = useState(() => getMemoria('fc_historial', null));
-  const [cargando, setCargando]     = useState(false);
-  const [index, setIndex]           = useState(() => getMemoria('fc_index', 0));
-  const [modo, setModo]             = useState(() => getMemoria('fc_modo', 'carga'));
-  const [eta, setEta]               = useState(() => getMemoria('fc_eta', ""));
-  const [presionando, setPresionando] = useState(false);
-  const [absorbiendo, setAbsorbiendo] = useState(false);
-  const [showReorder, setShowReorder] = useState(false);
+  const [input, setInput]               = useState(() => getMemoria('fc_input', ""));
+  const [pedidos, setPedidos]           = useState(() => getMemoria('fc_pedidos', []));
+  const [historial, setHistorial]       = useState(() => getMemoria('fc_historial', null));
+  const [cargando, setCargando]         = useState(false);
+  const [index, setIndex]               = useState(() => getMemoria('fc_index', 0));
+  const [modo, setModo]                 = useState(() => getMemoria('fc_modo', 'carga'));
+  const [eta, setEta]                   = useState(() => getMemoria('fc_eta', ""));
+  const [presionando, setPresionando]   = useState(false);
+  const [absorbiendo, setAbsorbiendo]   = useState(false);
+  const [showReorder, setShowReorder]   = useState(false);
   const [resetProgress, setResetProgress] = useState(0);
 
-  // --- ESTADO FASE 1: Alerta Modal Multicontrol ---
+  // --- Alerta Modal Multicontrol ---
   const [alertaSinTelefono, setAlertaSinTelefono] = useState(null);
   const [modalEditId, setModalEditId] = useState(null);
   const [modalEditPhone, setModalEditPhone] = useState('');
 
-  // --- ESTADOS FASE 2: MODO LÁPIZ ---
+  // --- Modo Edición ---
   const [modoEdicion, setModoEdicion] = useState(false);
   const [formEdicion, setFormEdicion] = useState({ cliente: '', telefono: '', direccion: '' });
   const [editProgress, setEditProgress] = useState(0);
   const editTimer = useRef(null);
 
-  // --- ESTADOS FASE 3: ANIMACIÓN Y ACORDEÓN ---
+  // --- Animación y Acordeón ---
   const [animatingMover, setAnimatingMover] = useState(null);
   const [expandedAdminId, setExpandedAdminId] = useState(null);
 
-  // --- ESTADO DE TRANSICIÓN DE TARJETA ---
-  // Cuando el índice cambia, se pone en false (invisible) durante
-  // 180ms para que el CSS genere el fade+slide de salida/entrada.
+  // --- Transición de tarjeta ---
   const [slideVisible, setSlideVisible] = useState(true);
 
-  // --- ESTADOS ADMIN "FILTRO FANTASMA" ---
+  // --- Admin Filtro Fantasma ---
   const [hiddenRutas, setHiddenRutas] = useState(() => getMemoria('fc_hidden_rutas', {}));
   const [hideProgress, setHideProgress] = useState({ id: null, progress: 0 });
   const hideTimer = useRef(null);
 
   const pressTimer  = useRef(null);
   const resetTimer  = useRef(null);
+  const syncTimeoutRef = useRef(null);
+  const adminTimer = useRef(null);
 
-  // --- ESTADOS SUPABASE Y ADMIN ---
-  const [sessionId] = useState(() => Math.random().toString(36).substring(7));
+  // --- Identificador de sesión persistente ---
+  const [sessionId] = useState(() => {
+    const cached = getMemoria('fc_session_id', null);
+    if (cached) return cached;
+    const nuevo = 'rep_' + Math.random().toString(36).substring(2, 9);
+    guardarMemoria('fc_session_id', nuevo);
+    return nuevo;
+  });
+
   const [showAdmin, setShowAdmin] = useState(false);
   const [adminProgress, setAdminProgress] = useState(0);
   const [rutasEnVivo, setRutasEnVivo] = useState([]);
   const [loadingAdmin, setLoadingAdmin] = useState(false);
   const [adminError, setAdminError] = useState(null);
-  const adminTimer = useRef(null);
 
-  // --- ESTADOS WEB PUSH ---
-  // 'idle' | 'requesting' | 'granted' | 'denied' | 'unsupported'
+  // --- Web Push ---
   const [pushEstado, setPushEstado] = useState('idle');
   const pushInicializado = useRef(false);
 
+  // Limpieza preventiva de temporizadores al desmontar componente
   useEffect(() => {
-    localStorage.setItem('fc_input',        JSON.stringify(input));
-    localStorage.setItem('fc_pedidos',      JSON.stringify(pedidos));
-    localStorage.setItem('fc_historial',    JSON.stringify(historial));
-    localStorage.setItem('fc_index',        JSON.stringify(index));
-    localStorage.setItem('fc_modo',         JSON.stringify(modo));
-    localStorage.setItem('fc_eta',          JSON.stringify(eta));
-    localStorage.setItem('fc_hidden_rutas', JSON.stringify(hiddenRutas));
+    return () => {
+      if (pressTimer.current) clearTimeout(pressTimer.current);
+      if (resetTimer.current) clearInterval(resetTimer.current);
+      if (editTimer.current) clearInterval(editTimer.current);
+      if (hideTimer.current) clearInterval(hideTimer.current);
+      if (adminTimer.current) clearInterval(adminTimer.current);
+      if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+    };
+  }, []);
+
+  // Persistencia segura de estados locales
+  useEffect(() => {
+    guardarMemoria('fc_input', input);
+    guardarMemoria('fc_pedidos', pedidos);
+    guardarMemoria('fc_historial', historial);
+    guardarMemoria('fc_index', index);
+    guardarMemoria('fc_modo', modo);
+    guardarMemoria('fc_eta', eta);
+    guardarMemoria('fc_hidden_rutas', hiddenRutas);
   }, [input, pedidos, historial, index, modo, eta, hiddenRutas]);
 
-  // --- REGISTRO DEL SERVICE WORKER AL MONTAR ---
-  // Se ejecuta una sola vez. Detecta si hay permiso previo concedido
-  // para actualizar el estado sin volver a pedir permiso al usuario.
+  // Registro del Service Worker al montar
   useEffect(() => {
     if (pushInicializado.current) return;
     pushInicializado.current = true;
@@ -100,63 +126,97 @@ function App() {
       setPushEstado('unsupported');
       return;
     }
-    // Registrar el SW siempre (necesario aunque no haya permiso aún)
     registrarServiceWorker();
-    // Reflejar el permiso actual sin disparar ningún dialog
     const permisoActual = Notification.permission;
     if (permisoActual === 'granted') setPushEstado('granted');
     else if (permisoActual === 'denied') setPushEstado('denied');
   }, []);
 
-  // --- TRANSICIÓN SUAVE AL CAMBIAR DE PEDIDO ---
-  // Cuando `index` cambia: oscurece y desplaza la tarjeta 180ms,
-  // luego la devuelve a su estado visible. Respeta prefers-reduced-motion.
+  // Transición suave de tarjeta al cambiar índice
   useEffect(() => {
     const prefReducida = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (prefReducida) return; // sin movimiento si el usuario lo pidió
+    if (prefReducida) return;
     setSlideVisible(false);
-    const t = setTimeout(() => setSlideVisible(true), 180);
+    const t = setTimeout(() => setSlideVisible(true), 160);
     return () => clearTimeout(t);
   }, [index]);
 
-  // --- LÓGICA DE SINCRONIZACIÓN EN LA NUBE ---
-  const sincronizarConNube = async () => {
-    if (pedidos.length === 0) return;
-    
-    if (!supabase) {
-      console.error("❌ SUPABASE APAGADO: Vite no está leyendo tu archivo .env");
-      return;
-    }
+  // Restauración limpia de estado ante cambio de visibilidad o retorno de background
+  useEffect(() => {
+    const handleVisibilityOrFocus = () => {
+      if (document.visibilityState === 'visible') {
+        setCargando(false);
+        setPresionando(false);
+        setAbsorbiendo(false);
+        if (pressTimer.current) clearTimeout(pressTimer.current);
+        if (resetTimer.current) clearInterval(resetTimer.current);
+        if (editTimer.current) clearInterval(editTimer.current);
+        if (hideTimer.current) clearInterval(hideTimer.current);
+
+        const cachedIndex = getMemoria('fc_index', null);
+        if (cachedIndex !== null && cachedIndex !== index) {
+          setIndex(cachedIndex);
+        }
+        const cachedModo = getMemoria('fc_modo', null);
+        if (cachedModo !== null && cachedModo !== modo) {
+          setModo(cachedModo);
+        }
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibilityOrFocus);
+    window.addEventListener('focus', handleVisibilityOrFocus);
+
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibilityOrFocus);
+      window.removeEventListener('focus', handleVisibilityOrFocus);
+    };
+  }, [index, modo]);
+
+  // Sincronización desacoplada con Supabase
+  const sincronizarConNube = useCallback(async () => {
+    if (pedidos.length === 0 || !supabase) return;
 
     try {
-      const { data, error } = await supabase.from('monitoreo_rutas').upsert({
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 6000);
+
+      const { error } = await supabase.from('monitoreo_rutas').upsert({
         id: sessionId,
-        nombre_repartidor: "Repartidor " + sessionId.substring(0,3).toUpperCase(),
+        nombre_repartidor: "Repartidor " + sessionId.substring(0, 5).toUpperCase(),
         progreso_actual: index,
         total_pedidos: pedidos.length,
         pedidos_json: pedidos,
         ultima_actualizacion: new Date().toISOString(),
         esta_activo: modo !== 'fin'
-      });
+      }).abortSignal(controller.signal);
+
+      clearTimeout(timeoutId);
 
       if (error) {
-        console.error("❌ ERROR DE SUPABASE RECHAZANDO EL DATO:", error.message, error.details);
-      } else {
-        console.log("✅ DATO ENVIADO A LA NUBE CON ÉXITO");
+        console.warn("Sincronización en la nube rechazada:", error.message);
       }
-    } catch (e) { 
-      console.error("❌ Error de red intentando conectar a la nube:", e); 
+    } catch {
+      // Degradar silenciosamente sin bloquear la UI en desconexión móvil
     }
-  };
+  }, [pedidos, index, modo, sessionId]);
 
+  // Ejecución de sincronización con debounce
   useEffect(() => {
-    sincronizarConNube();
-  }, [index, pedidos, modo]);
+    if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+    syncTimeoutRef.current = setTimeout(() => {
+      sincronizarConNube();
+    }, 600);
 
-  // --- LÓGICA DEL MODO DIOS (ADMIN) ---
+    return () => {
+      if (syncTimeoutRef.current) clearTimeout(syncTimeoutRef.current);
+    };
+  }, [sincronizarConNube]);
+
+  // Lógica del Panel Admin
   const cargarRutasEnVivo = async () => {
     if (!supabase) {
-      setAdminError("Sin conexión a la nube.");
+      setAdminError("Sin conexión configurada a Supabase.");
       return;
     }
     setLoadingAdmin(true);
@@ -180,12 +240,9 @@ function App() {
       clearTimeout(timeoutId);
 
       if (error) {
-        console.error('❌ Error radar:', error.message);
+        console.error('Error al consultar radar:', error.message);
         setAdminError('Error al cargar datos. Intenta de nuevo.');
       } else if (data) {
-        // ── DEDUPLICACIÓN: si un mismo nombre_repartidor tiene varias filas
-        // (por recargas que generaron nuevos sessionId), conservamos solo
-        // la fila con ultima_actualizacion más reciente por cada nombre.
         const mapaDeduplicado = new Map();
         for (const ruta of data) {
           const clave = ruta.nombre_repartidor;
@@ -198,29 +255,25 @@ function App() {
             }
           }
         }
-        const deduplicados = Array.from(mapaDeduplicado.values());
-        console.log(`✅ Radar: ${deduplicados.length} repartidor(es) único(s) activo(s).`);
-        setRutasEnVivo(deduplicados);
+        setRutasEnVivo(Array.from(mapaDeduplicado.values()));
       }
-    } catch(e) {
+    } catch (e) {
       if (e.name === 'AbortError') {
         setAdminError('Tiempo de espera agotado. Verifica tu conexión.');
       } else {
         setAdminError('Error de red inesperado.');
       }
-      console.error('❌ Error cargarRutasEnVivo:', e);
     } finally {
       setLoadingAdmin(false);
     }
   };
 
-  // Limpia el panel local: borra el estado en pantalla y el mapa de ocultos
-  // para dejar el radar en blanco y listo para una nueva jornada.
   const limpiarRadar = () => {
     setRutasEnVivo([]);
     setHiddenRutas({});
     setExpandedAdminId(null);
     setAdminError(null);
+    dispararHaptico(20);
   };
 
   const startAdmin = () => {
@@ -230,22 +283,23 @@ function App() {
           clearInterval(adminTimer.current);
           cargarRutasEnVivo();
           setShowAdmin(true);
+          dispararHaptico(30);
           return 0;
         }
         return prev + 5;
       });
-    }, 50);
+    }, 40);
   };
   const stopAdmin = () => { clearInterval(adminTimer.current); setAdminProgress(0); };
 
-  // --- LÓGICA FILTRO FANTASMA (Ocultar Repartidor) ---
   const startHide = (id) => {
     setHideProgress({ id, progress: 0 });
     hideTimer.current = setInterval(() => {
       setHideProgress(prev => {
         if (prev.progress >= 100) {
           clearInterval(hideTimer.current);
-          setHiddenRutas(h => ({ ...h, [id]: Date.now() })); // Guardamos la hora de ocultamiento
+          setHiddenRutas(h => ({ ...h, [id]: Date.now() }));
+          dispararHaptico(20);
           return { id: null, progress: 0 };
         }
         return { id, progress: prev.progress + 5 };
@@ -259,12 +313,14 @@ function App() {
   };
   
   const handleProcesar = async () => {
+    if (!input.trim()) return;
     setCargando(true);
+    dispararHaptico(25);
     try {
       const data = await procesarPedidos(input);
       const preparar = (ruta) => ruta.map(p => ({
         ...p,
-        id: Math.random().toString(36).substring(2, 9), // 🪪 Carnet de Identidad oculto para que no se maree la UI
+        id: Math.random().toString(36).substring(2, 9),
         items: p.items.map(i => ({ nombre: i, marcado: false, sacado: false, entrega_at: null }))
       }));
       if (data.pedidos && data.pedidos.length > 0) {
@@ -278,22 +334,24 @@ function App() {
       }
     } catch (error) {
       console.error(error);
-      alert("Error al procesar. Revisa el formato del texto.");
+      alert("Error al procesar el texto ingresado.");
+    } finally {
+      setCargando(false);
     }
-    setCargando(false);
   };
 
   const restaurarUltima = () => {
     if (historial && historial.length > 0) {
+      dispararHaptico(20);
       setPedidos(JSON.parse(JSON.stringify(historial))); 
       setIndex(0);
       setModo('carga');
     }
   };
 
-  // --- ACTIVAR NOTIFICACIONES PUSH (para el admin) ---
   const activarPush = async () => {
     if (pushEstado === 'requesting') return;
+    dispararHaptico(15);
     setPushEstado('requesting');
     const permiso = await solicitarPermisoPush();
     if (permiso === 'granted') {
@@ -309,10 +367,15 @@ function App() {
   const startReset = () => {
     resetTimer.current = setInterval(() => {
       setResetProgress(prev => {
-        if (prev >= 100) { clearInterval(resetTimer.current); limpiarTodo(); return 0; }
+        if (prev >= 100) { 
+          clearInterval(resetTimer.current); 
+          limpiarTodo(); 
+          dispararHaptico(40);
+          return 0; 
+        }
         return prev + 5;
       });
-    }, 50);
+    }, 40);
   };
   const stopReset = () => { clearInterval(resetTimer.current); setResetProgress(0); };
 
@@ -321,7 +384,6 @@ function App() {
     setPedidos([]); setInput(""); setIndex(0); setModo('carga'); setEta("");
   };
 
-  // --- LÓGICA MODO SPOTIFY (FASE 3 - CORREGIDA) ---
   const moverPedido = (from, to) => {
     const nuevos = [...pedidos];
     const [removido] = nuevos.splice(from, 1);
@@ -331,43 +393,43 @@ function App() {
 
   const moverPedidoConAnimacion = (from, to) => {
     if (animatingMover) return;
+    dispararHaptico(15);
     setAnimatingMover({ from, to });
     
     setTimeout(() => {
       moverPedido(from, to);
-      setAnimatingMover(null); // Al borrar esto, el CSS se apaga justo cuando la tarjeta cae en su nueva posición física
-    }, 300);
+      setAnimatingMover(null);
+    }, 280);
   };
 
-  // --- NUEVAS FUNCIONES OPERATIVAS (FASE 1) ---
   const pedirTelefonoAdmin = () => {
     const numAdmin = "56988589058";
-    const msj = `Necesito el número de teléfono de ${pedidoActual.direccion}`;
-    window.open(`https://wa.me/${numAdmin}?text=${encodeURIComponent(msj)}`, '_blank');
+    const dir = pedidoActual?.direccion || 'dirección';
+    const msj = `Necesito el número de teléfono de ${dir}`;
+    abrirWhatsApp({ telefono: numAdmin, mensaje: msj });
   };
 
   const intentarComenzarRuta = () => {
-    // Escaneamos toda la lista y guardamos el índice real de cada pedido sin teléfono
+    dispararHaptico(20);
     const faltan = pedidos.map((p, i) => ({ ...p, originalIndex: i })).filter(p => !p.telefono);
     if (faltan.length > 0) {
-      setAlertaSinTelefono(faltan); // Array completo
+      setAlertaSinTelefono(faltan);
     } else {
       cambiarAModoReparto();
     }
   };
 
-  // Lógica para guardar un teléfono desde adentro del modal
   const guardarTelefonoModal = (idx) => {
+    dispararHaptico(15);
+    const telLimpio = sanitizarTelefonoChileno(modalEditPhone);
     const nuevos = [...pedidos];
-    nuevos[idx].telefono = modalEditPhone;
+    nuevos[idx].telefono = telLimpio;
     setPedidos(nuevos);
     setModalEditId(null);
     setModalEditPhone('');
     
-    // Filtramos la lista del modal para quitar el que acabamos de arreglar
     const restantes = alertaSinTelefono.filter(item => item.originalIndex !== idx);
     if (restantes.length === 0) {
-      // Si ya no quedan errores, cerramos el modal y salimos a ruta automáticamente
       setAlertaSinTelefono(null);
       cambiarAModoReparto();
     } else {
@@ -375,7 +437,6 @@ function App() {
     }
   };
 
-  // --- NUEVAS FUNCIONES FASE 2: MODO LÁPIZ ---
   const startEditPress = () => {
     editTimer.current = setInterval(() => {
       setEditProgress(prev => {
@@ -387,11 +448,12 @@ function App() {
             direccion: pedidos[index]?.direccion || '' 
           });
           setModoEdicion(true);
+          dispararHaptico(25);
           return 0;
         }
         return prev + 5;
       });
-    }, 40);
+    }, 35);
   };
   
   const stopEditPress = () => {
@@ -400,52 +462,58 @@ function App() {
   };
 
   const guardarEdicion = () => {
+    dispararHaptico(20);
     const nuevos = [...pedidos];
-    nuevos[index] = { ...nuevos[index], ...formEdicion };
+    nuevos[index] = { 
+      ...nuevos[index], 
+      cliente: formEdicion.cliente.trim(),
+      telefono: sanitizarTelefonoChileno(formEdicion.telefono),
+      direccion: formEdicion.direccion.trim()
+    };
     setPedidos(nuevos);
     setModoEdicion(false);
   };
 
   const enviarAvisoCliente = () => {
+    if (!pedidoActual?.telefono) return;
     const min = eta || 'unos';
-    const texto = `¡Hola! 🥨 Le habla el repartidor de Full Canapé. Ya voy en camino a su dirección. Llego aproximadamente en ${min} minutos. ¡Nos vemos pronto! 🚚✨`;
-    window.open(`https://wa.me/${pedidoActual.telefono}?text=${encodeURIComponent(texto)}`, '_blank');
+    const texto = `¡Hola! Le habla el repartidor de Full Canapé. Ya voy en camino a su dirección. Llego aproximadamente en ${min} minutos. ¡Nos vemos pronto!`;
+    abrirWhatsApp({ telefono: pedidoActual.telefono, mensaje: texto });
   };
 
   const enviarAvisoLlegada = () => {
-    const texto = `¡Hola! 👋 Ya estoy llegando a su domicilio. Por favor, esté atento/a para recibir su pedido. ¡Muchas gracias! 🚚✨`;
-    window.open(`https://wa.me/${pedidoActual.telefono}?text=${encodeURIComponent(texto)}`, '_blank');
+    if (!pedidoActual?.telefono) return;
+    const texto = `¡Hola! Ya estoy llegando a su domicilio. Por favor, esté atento/a para recibir su pedido. ¡Muchas gracias!`;
+    abrirWhatsApp({ telefono: pedidoActual.telefono, mensaje: texto });
   };
 
-  // Abre el chat de WhatsApp sin texto predefinido para escritura libre.
   const abrirChatVacio = () => {
-    window.open(`https://wa.me/${pedidoActual.telefono}`, '_blank');
+    if (!pedidoActual?.telefono) return;
+    abrirWhatsApp({ telefono: pedidoActual.telefono });
   };
 
   const avisarAdmin = () => {
     const numAdmin = "56988589058";
-    const dir = pedidoActual.direccion;
+    const dir = pedidoActual?.direccion || 'dirección';
     const msj = index === 0
       ? `Saliendo! ${eta} min a ${dir}`
-      : `Entregado ${pedidos[index - 1].direccion}. Ahora ${eta} min a ${dir}`;
-    window.open(`https://wa.me/${numAdmin}?text=${encodeURIComponent(msj)}`, '_blank');
+      : `Entregado ${pedidos[index - 1]?.direccion || ''}. Ahora ${eta} min a ${dir}`;
+    abrirWhatsApp({ telefono: numAdmin, mensaje: msj });
   };
 
-  const abrirMapa = (dir) => window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(dir)}`, '_blank');
-  
   const finalizarRuta = () => {
-    // Notificación push de cierre de ruta: se dispara antes de la animación
-    // para que el admin reciba el aviso aunque la app quede en segundo plano.
+    dispararHaptico(40);
     const ultimaDireccion = pedidos[pedidos.length - 1]?.direccion || '';
     dispararNotificacionPush(
-      '✅ Ruta completada — Full Canapé',
-      `Última entrega en ${ultimaDireccion}. ¡Ruta terminada con éxito!`
+      'Ruta completada — Full Canapé',
+      `Última entrega en ${ultimaDireccion}. Ruta terminada con éxito.`
     );
     setAbsorbiendo(true);
-    setTimeout(() => { setModo('fin'); setAbsorbiendo(false); }, 800);
+    setTimeout(() => { setModo('fin'); setAbsorbiendo(false); }, 750);
   };
   
-  const toggleCaja  = (i) => {
+  const toggleCaja = (i) => {
+    dispararHaptico(15);
     const n = [...pedidos];
     if (modo === 'carga') {
       n[index].items[i].marcado = !n[index].items[i].marcado;
@@ -457,42 +525,47 @@ function App() {
   };
   
   const cambiarAModoReparto = () => {
+    dispararHaptico(30);
     setIndex(0); setEta(''); setModo('reparto');
-    // Notificar al admin que la ruta acaba de comenzar
     if (pedidos.length > 0) {
       dispararNotificacionPush(
-        '🚚 Ruta iniciada — Full Canapé',
-        `Repartidor en camino a la 1ª parada: ${pedidos[0]?.direccion || ''}`
+        'Ruta iniciada — Full Canapé',
+        `Repartidor en camino a la parada 1: ${pedidos[0]?.direccion || ''}`
       );
     }
   };
+
   const avanzar = () => {
+    dispararHaptico(20);
     setIndex(i => {
       const siguiente = Math.min(pedidos.length - 1, i + 1);
-      // Push SOLO en modo calle. El check-in es privado del repartidor:
-      // navegar entre pedidos con las flechas no debe notificar al admin.
       if (siguiente > i && modo === 'reparto') {
         const dirAnterior = pedidos[i]?.direccion || 'dirección anterior';
         const dirSiguiente = pedidos[siguiente]?.direccion || '';
         const mensaje = dirSiguiente
           ? `Entregado en ${dirAnterior}. En camino a: ${dirSiguiente}`
-          : `Entregado en ${dirAnterior}. ¡Última parada completada!`;
-        dispararNotificacionPush('📦 Entrega registrada — Full Canapé', mensaje);
+          : `Entregado en ${dirAnterior}. Última parada completada.`;
+        dispararNotificacionPush('Entrega registrada — Full Canapé', mensaje);
       }
       return siguiente;
     });
   };
-  const retroceder = () => setIndex(i => Math.max(0, i - 1));
-  const todoCargado = pedidos.length > 0 && pedidos.every(p => p.items.every(it => it.marcado));
+
+  const retroceder = () => {
+    dispararHaptico(15);
+    setIndex(i => Math.max(0, i - 1));
+  };
+
+  const todoCargado = pedidos.length > 0 && pedidos.every(p => (p.items || []).every(it => it.marcado));
 
   const BotonRayo = () => (
     <button
       onPointerDown={() => {
         setPresionando(true);
         pressTimer.current = setTimeout(() => {
-          // 1. Marcar todos los ítems del pedido actual
+          dispararHaptico(35);
           const n = [...pedidos];
-          n[index].items.forEach(it => {
+          (n[index]?.items || []).forEach(it => {
             if (modo === 'carga') {
               it.marcado = true;
             } else {
@@ -502,34 +575,30 @@ function App() {
           });
           setPedidos(n);
           setPresionando(false);
-          // 2. Auto-avanzar SOLO en modo reparto y si no es el último pedido.
-          //    350ms de pausa da feedback visual de "todo marcado" antes de saltar.
-          //    En check-in no avanza: el repartidor carga pedido a pedido y
-          //    decide él cuándo pasar al siguiente.
           if (modo === 'reparto' && index < pedidos.length - 1) {
-            setTimeout(() => { avanzar(); setEta(''); }, 350);
+            setTimeout(() => { avanzar(); setEta(''); }, 300);
           }
-        }, 800);
+        }, 750);
       }}
       onPointerUp={() => { setPresionando(false); clearTimeout(pressTimer.current); }}
       onPointerLeave={() => { setPresionando(false); clearTimeout(pressTimer.current); }}
       aria-label="Marcar todo (mantén presionado)"
-      className="relative overflow-hidden bg-stone-100 w-[72px] h-[72px] rounded-3xl flex flex-col items-center justify-center border-2 border-stone-200 active:scale-90 transition-transform duration-150 select-none touch-none shrink-0 cursor-pointer shadow-card"
+      className="relative overflow-hidden bg-slate-100 w-[72px] h-[72px] rounded-3xl flex flex-col items-center justify-center border-2 border-slate-300 active:scale-95 transition-transform duration-150 select-none touch-none shrink-0 cursor-pointer shadow-sm"
       style={{ WebkitUserSelect: 'none' }}
     >
       <div
-        className="absolute bottom-0 left-0 w-full bg-emerald-400 transition-all ease-linear rounded-b-2xl"
-        style={{ height: presionando ? '100%' : '0%', transitionDuration: presionando ? '800ms' : '200ms' }}
+        className="absolute bottom-0 left-0 w-full bg-emerald-500 transition-all ease-linear rounded-b-2xl"
+        style={{ height: presionando ? '100%' : '0%', transitionDuration: presionando ? '750ms' : '150ms' }}
       />
-      <Zap size={22} className={`relative z-10 transition-colors ${presionando ? 'text-white' : 'text-stone-400'}`} />
-      <span className={`text-[9px] font-black relative z-10 transition-colors mt-1 tracking-wider ${presionando ? 'text-white' : 'text-stone-400'}`}>
+      <Zap size={22} className={`relative z-10 transition-colors ${presionando ? 'text-white' : 'text-slate-600'}`} />
+      <span className={`text-[9px] font-black relative z-10 transition-colors mt-1 tracking-wider ${presionando ? 'text-white' : 'text-slate-700'}`}>
         TODO
       </span>
     </button>
   );
 
   const BotonPrincipalAccion = () => (
-    <div className="pt-5 border-t border-stone-100 bg-white w-full">
+    <div className="pt-5 border-t border-slate-200 bg-white w-full">
       {modo === 'carga' ? (
         <button
           onClick={intentarComenzarRuta}
@@ -539,24 +608,27 @@ function App() {
             w-full h-[68px] rounded-3xl font-black text-sm sm:text-base text-white
             transition-all duration-200 flex items-center justify-center gap-3 cursor-pointer
             ${todoCargado
-              ? 'bg-emerald-500 active:scale-[0.97] shadow-[0_4px_12px_rgba(16,185,129,0.3),0_8px_24px_rgba(16,185,129,0.2)]'
-              : 'bg-stone-300 cursor-not-allowed'}
+              ? 'bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] shadow-emerald'
+              : 'bg-slate-200 text-slate-500 border border-slate-300 cursor-not-allowed'}
           `}
         >
           {todoCargado
-            ? <><CheckCircle2 size={20} /> ¡TODO LISTO! COMENZAR RUTA</>
+            ? <><CheckCircle2 size={20} /> TODO LISTO — COMENZAR RUTA</>
             : <><Package size={20} /> FALTAN CAJAS POR MARCAR</>}
         </button>
       ) : (
         <button
           onClick={index === pedidos.length - 1 ? finalizarRuta : () => { avanzar(); setEta(""); }}
-          disabled={!pedidoActual.items.every(it => it.sacado)}
+          disabled={!(pedidoActual?.items || []).every(it => it.sacado)}
           aria-label={index === pedidos.length - 1 ? 'Terminar ruta' : 'Siguiente entrega'}
-          className="
-            w-full h-[68px] bg-stone-900 text-white rounded-3xl font-black text-sm sm:text-base
-            active:scale-[0.97] transition-all duration-200 disabled:opacity-40
-            shadow-dark flex items-center justify-center gap-3 cursor-pointer
-          "
+          className={`
+            w-full h-[68px] text-white rounded-3xl font-black text-sm sm:text-base
+            active:scale-[0.98] transition-all duration-200 disabled:opacity-40
+            flex items-center justify-center gap-3 cursor-pointer
+            ${index === pedidos.length - 1 
+              ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald' 
+              : 'bg-red-600 hover:bg-red-700 shadow-cta'}
+          `}
         >
           <Truck size={20} />
           {index === pedidos.length - 1 ? 'TERMINAR RUTA' : 'ENTREGADO — SIGUIENTE'}
@@ -566,7 +638,6 @@ function App() {
   );
 
   if (showAdmin) {
-    // Filtro Fantasma: solo mostramos rutas no ocultadas o con actividad posterior al ocultamiento
     const rutasVisibles = rutasEnVivo.filter(ruta => {
       const hiddenAt = hiddenRutas[ruta.id];
       if (!hiddenAt) return true;
@@ -576,7 +647,7 @@ function App() {
 
     return (
       <div
-        className="min-h-screen bg-stone-950 flex flex-col relative max-w-xl mx-auto text-white"
+        className="min-h-screen bg-slate-50 flex flex-col relative max-w-xl mx-auto text-slate-900"
         style={{
           paddingTop: 'max(1.5rem, env(safe-area-inset-top))',
           paddingBottom: 'max(1.5rem, env(safe-area-inset-bottom))',
@@ -584,184 +655,174 @@ function App() {
           paddingRight: 'max(1.5rem, env(safe-area-inset-right))'
         }}
       >
-        {/* Header Admin */}
         <div className="flex justify-between items-center mb-6">
           <div>
             <div className="flex items-center gap-2 mb-1">
-              <span className="w-2 h-2 rounded-full bg-red-500 animate-pulse-dot inline-block" />
-              <p className="text-red-500 text-xs font-black uppercase tracking-widest">Radar en vivo</p>
+              <span className="w-2.5 h-2.5 rounded-full bg-red-600 animate-pulse-dot inline-block" />
+              <p className="text-red-700 text-xs font-black uppercase tracking-widest">Radar en vivo</p>
             </div>
-            <h2 className="text-white text-3xl font-black tracking-tight">PANEL ADMIN</h2>
+            <h2 className="text-slate-900 text-3xl font-black tracking-tight">PANEL ADMIN</h2>
           </div>
           <button
             onClick={() => setShowAdmin(false)}
-            className="bg-white/10 p-3 rounded-2xl text-white hover:bg-white/20 active:scale-90 transition-all duration-150 cursor-pointer"
+            className="bg-white border-2 border-slate-200 p-3 rounded-2xl text-slate-700 hover:bg-slate-100 active:scale-95 transition-all cursor-pointer shadow-sm"
             aria-label="Cerrar panel admin"
           >
             <X size={20} />
           </button>
         </div>
 
-        {/* Botón actualizar */}
         <button
           onClick={cargarRutasEnVivo}
           disabled={loadingAdmin}
-          className="mb-5 flex items-center justify-center gap-2 w-full bg-white/5 border border-white/10 py-4 rounded-2xl text-xs font-bold uppercase tracking-widest hover:bg-white/10 active:scale-95 transition-all duration-200 cursor-pointer disabled:opacity-50 disabled:cursor-wait"
+          className="mb-5 flex items-center justify-center gap-2 w-full bg-white border-2 border-slate-300 py-4 rounded-2xl text-xs font-black uppercase tracking-widest text-slate-800 hover:bg-slate-100 active:scale-[0.98] transition-all cursor-pointer disabled:opacity-50 shadow-sm"
         >
           <RefreshCcw size={14} className={loadingAdmin ? 'animate-spin' : ''} />
-          {loadingAdmin ? 'Cargando...' : 'Actualizar Radar'}
+          {loadingAdmin ? 'Cargando radar...' : 'Actualizar Radar'}
         </button>
 
-        {/* Estado de error */}
         {adminError && (
-          <div className="mb-4 flex items-center gap-3 bg-red-950/60 border border-red-800 text-red-300 text-xs font-bold p-4 rounded-2xl animate-fade-in">
-            <AlertTriangle size={16} className="shrink-0 text-red-400" />
+          <div className="mb-4 flex items-center gap-3 bg-red-50 border-2 border-red-300 text-red-800 text-xs font-bold p-4 rounded-2xl animate-fade-in shadow-sm">
+            <AlertTriangle size={16} className="shrink-0 text-red-600" />
             {adminError}
           </div>
         )}
 
-        {/* Lista de rutas */}
         <div className="flex-1 space-y-4 overflow-y-auto pb-4">
           {loadingAdmin && rutasEnVivo.length === 0 ? (
-            <div className="flex flex-col items-center justify-center mt-16 gap-4 text-stone-500">
-              <Loader2 size={32} className="animate-spin" />
-              <p className="text-sm font-bold">Conectando con el radar...</p>
+            <div className="flex flex-col items-center justify-center mt-16 gap-4 text-slate-500">
+              <Loader2 size={32} className="animate-spin text-slate-600" />
+              <p className="text-sm font-bold text-slate-700">Conectando con el radar logístico...</p>
             </div>
           ) : rutasVisibles.length === 0 ? (
             <div className="flex flex-col items-center mt-16 text-center gap-3">
-              <div className="bg-stone-900 p-6 rounded-3xl">
-                <Truck size={40} className="text-stone-700 mb-2" />
+              <div className="bg-white p-6 rounded-3xl border-2 border-slate-200 shadow-sm">
+                <Truck size={40} className="text-slate-400 mb-2" />
               </div>
-              <p className="text-stone-500 font-bold">No hay repartidores activos</p>
-              <p className="text-stone-600 text-xs font-semibold">en las últimas 48 horas</p>
+              <p className="text-slate-700 font-bold">No hay repartidores activos</p>
+              <p className="text-slate-500 text-xs font-semibold">en las últimas 48 horas</p>
             </div>
           ) : (
             <>
               {rutasVisibles.map(ruta => {
-              const porcentaje = Math.round((ruta.progreso_actual / ruta.total_pedidos) * 100) || 0;
-              const horasPasadas = (new Date() - new Date(ruta.ultima_actualizacion)) / (1000 * 60 * 60);
-              const isStale = horasPasadas > 12;
-              const isExpanded = expandedAdminId === ruta.id;
+                const porcentaje = Math.round((ruta.progreso_actual / ruta.total_pedidos) * 100) || 0;
+                const horasPasadas = (new Date() - new Date(ruta.ultima_actualizacion)) / (1000 * 60 * 60);
+                const isStale = horasPasadas > 12;
+                const isExpanded = expandedAdminId === ruta.id;
 
-              return (
-                <div
-                  key={ruta.id}
-                  className={`bg-stone-900 rounded-3xl border transition-all duration-300 ${
-                    isStale ? 'border-amber-700/70' : 'border-white/8'
-                  }`}
-                >
-                  {/* Cabecera acordeón */}
+                return (
                   <div
-                    className="flex justify-between items-center cursor-pointer select-none p-5"
-                    onClick={() => setExpandedAdminId(isExpanded ? null : ruta.id)}
-                  >
-                    <div className="flex-1 min-w-0 pr-3">
-                      <h3 className="font-black text-base flex items-center gap-2 truncate">
-                        {!isStale && <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse-dot shrink-0" />}
-                        {ruta.nombre_repartidor}
-                        {isStale && <Clock size={14} className="text-amber-500 shrink-0" />}
-                      </h3>
-                      {/* ID corto visible: permite al admin identificar duplicados de forma inmediata */}
-                      <p className="text-[9px] font-mono text-stone-600 mt-0.5 truncate">
-                        ID: {String(ruta.id).substring(0, 10)}…
-                      </p>
-
-                      {/* Barra de progreso */}
-                      <div className="mt-2.5 flex items-center gap-3">
-                        <div className="flex-1 h-1.5 bg-white/10 rounded-full overflow-hidden">
-                          <div
-                            className="h-full rounded-full transition-all duration-500"
-                            style={{
-                              width: `${porcentaje}%`,
-                              backgroundColor: porcentaje === 100 ? '#10b981' : '#ef4444'
-                            }}
-                          />
-                        </div>
-                        <span className="text-[11px] font-black text-stone-400 shrink-0">
-                          {ruta.progreso_actual}/{ruta.total_pedidos}
-                        </span>
-                      </div>
-                    </div>
-
-                    <div className="flex items-center gap-2 shrink-0">
-                      <ChevronDown
-                        size={18}
-                        className={`text-stone-500 transition-transform duration-300 ${isExpanded ? 'rotate-180' : ''}`}
-                      />
-                      {/* Botón ocultar (mantener presionado) */}
-                      <button
-                        onPointerDown={(e) => { e.stopPropagation(); startHide(ruta.id); }}
-                        onPointerUp={(e) => { e.stopPropagation(); stopHide(); }}
-                        onPointerLeave={(e) => { e.stopPropagation(); stopHide(); }}
-                        className="relative overflow-hidden bg-white/8 p-2 rounded-xl text-stone-500 active:scale-90 transition-transform"
-                        style={{ WebkitUserSelect: 'none', touchAction: 'none' }}
-                        aria-label="Mantén para ocultar repartidor"
-                      >
-                        <div
-                          className="absolute bottom-0 left-0 h-full bg-red-500 transition-all ease-linear"
-                          style={{ width: hideProgress.id === ruta.id ? `${hideProgress.progress}%` : '0%' }}
-                        />
-                        <X size={14} className="relative z-10" />
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Detalle acordeón */}
-                  <div
-                    className={`overflow-hidden transition-all duration-300 ease-in-out ${
-                      isExpanded ? 'max-h-[1000px] opacity-100' : 'max-h-0 opacity-0'
+                    key={ruta.id}
+                    className={`bg-white rounded-3xl border-2 transition-all duration-200 shadow-sm ${
+                      isStale ? 'border-amber-400' : 'border-slate-200'
                     }`}
                   >
-                    <div className="px-5 pb-5 pt-1 border-t border-white/8">
-                      <div className="space-y-2.5 mt-4">
-                        {(ruta.pedidos_json || []).map((p, i) => {
-                          const entregado = Array.isArray(p.items) && p.items.some(it => it.sacado);
-                          const horaEntrega = Array.isArray(p.items) && p.items.find(it => it.sacado)?.entrega_at;
-                          const esCurrent = i === ruta.progreso_actual;
-                          return (
+                    <div
+                      className="flex justify-between items-center cursor-pointer select-none p-5"
+                      onClick={() => setExpandedAdminId(isExpanded ? null : ruta.id)}
+                    >
+                      <div className="flex-1 min-w-0 pr-3">
+                        <h3 className="font-black text-base flex items-center gap-2 truncate text-slate-900">
+                          {!isStale && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse-dot shrink-0" />}
+                          {ruta.nombre_repartidor}
+                          {isStale && <Clock size={14} className="text-amber-600 shrink-0" />}
+                        </h3>
+                        <p className="text-[10px] font-mono text-slate-500 mt-0.5 truncate">
+                          ID: {String(ruta.id).substring(0, 12)}
+                        </p>
+
+                        <div className="mt-2.5 flex items-center gap-3">
+                          <div className="flex-1 h-2 bg-slate-200 rounded-full overflow-hidden">
                             <div
-                              key={i}
-                              className={`flex justify-between items-center p-3 rounded-2xl border transition-colors ${
-                                esCurrent
-                                  ? 'bg-red-600/15 border-red-600/30'
-                                  : entregado
-                                    ? 'bg-emerald-950/30 border-emerald-900/20'
-                                    : 'bg-black/20 border-white/5'
-                              }`}
-                            >
-                              <div className="min-w-0 pr-3">
-                                <p className={`text-[9px] font-black uppercase tracking-widest mb-0.5 ${
-                                  esCurrent ? 'text-red-400' : entregado ? 'text-emerald-600' : 'text-stone-600'
-                                }`}>
-                                  {esCurrent ? '▶ EN CAMINO' : `Parada ${i + 1}`}
-                                </p>
-                                <p className="text-sm font-bold text-stone-300 truncate">{p.direccion}</p>
+                              className="h-full rounded-full transition-all duration-500"
+                              style={{
+                                width: `${porcentaje}%`,
+                                backgroundColor: porcentaje === 100 ? '#10b981' : '#dc2626'
+                              }}
+                            />
+                          </div>
+                          <span className="text-[11px] font-black text-slate-700 shrink-0">
+                            {ruta.progreso_actual}/{ruta.total_pedidos}
+                          </span>
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        <ChevronDown
+                          size={18}
+                          className={`text-slate-600 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
+                        />
+                        <button
+                          onPointerDown={(e) => { e.stopPropagation(); startHide(ruta.id); }}
+                          onPointerUp={(e) => { e.stopPropagation(); stopHide(); }}
+                          onPointerLeave={(e) => { e.stopPropagation(); stopHide(); }}
+                          className="relative overflow-hidden bg-slate-100 border border-slate-200 p-2 rounded-xl text-slate-600 active:scale-95 transition-transform hover:bg-slate-200"
+                          style={{ WebkitUserSelect: 'none', touchAction: 'none' }}
+                          aria-label="Mantén para ocultar repartidor"
+                        >
+                          <div
+                            className="absolute bottom-0 left-0 h-full bg-red-500 transition-all ease-linear"
+                            style={{ width: hideProgress.id === ruta.id ? `${hideProgress.progress}%` : '0%' }}
+                          />
+                          <X size={14} className="relative z-10" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div
+                      className={`overflow-hidden transition-all duration-300 ease-in-out ${
+                        isExpanded ? 'max-h-[1000px] opacity-100' : 'max-h-0 opacity-0'
+                      }`}
+                    >
+                      <div className="px-5 pb-5 pt-1 border-t border-slate-200 bg-slate-50/70 rounded-b-3xl">
+                        <div className="space-y-2 mt-4">
+                          {(ruta.pedidos_json || []).map((p, i) => {
+                            const entregado = Array.isArray(p.items) && p.items.some(it => it.sacado);
+                            const horaEntrega = Array.isArray(p.items) && p.items.find(it => it.sacado)?.entrega_at;
+                            const esCurrent = i === ruta.progreso_actual;
+                            return (
+                              <div
+                                key={i}
+                                className={`flex justify-between items-center p-3.5 rounded-2xl border-2 transition-colors ${
+                                  esCurrent
+                                    ? 'bg-red-50 border-red-300'
+                                    : entregado
+                                      ? 'bg-emerald-50 border-emerald-200'
+                                      : 'bg-white border-slate-200'
+                                }`}
+                              >
+                                <div className="min-w-0 pr-3">
+                                  <p className={`text-[9px] font-black uppercase tracking-widest mb-0.5 ${
+                                    esCurrent ? 'text-red-700' : entregado ? 'text-emerald-700' : 'text-slate-500'
+                                  }`}>
+                                    {esCurrent ? '▶ EN CAMINO' : `Parada ${i + 1}`}
+                                  </p>
+                                  <p className="text-sm font-bold text-slate-900 truncate">{p.direccion}</p>
+                                </div>
+                                <div className="shrink-0 text-right">
+                                  {entregado
+                                    ? <span className="text-emerald-700 font-black text-sm">{horaEntrega || '✓'}</span>
+                                    : <span className="text-slate-500 font-black text-[10px] uppercase">Pendiente</span>
+                                  }
+                                </div>
                               </div>
-                              <div className="shrink-0 text-right">
-                                {entregado
-                                  ? <span className="text-emerald-400 font-black text-sm">{horaEntrega || '✓'}</span>
-                                  : <span className="text-stone-600 font-black text-[10px] uppercase">Pendiente</span>
-                                }
-                              </div>
-                            </div>
-                          );
-                        })}
+                            );
+                          })}
+                        </div>
                       </div>
                     </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
 
-              {/* ── Botón Limpiar Todo ── */}
               <div className="pt-2 pb-2">
                 <button
                   onClick={limpiarRadar}
-                  className="w-full flex items-center justify-center gap-2.5 py-4 rounded-2xl border border-dashed border-stone-700 text-stone-500 text-xs font-black uppercase tracking-widest hover:border-red-800 hover:text-red-400 hover:bg-red-950/20 active:scale-[0.97] transition-all duration-200 cursor-pointer group"
+                  className="w-full flex items-center justify-center gap-2.5 py-4 rounded-2xl border-2 border-dashed border-slate-300 bg-white text-slate-700 text-xs font-black uppercase tracking-widest hover:border-red-600 hover:text-red-700 hover:bg-red-50 active:scale-[0.98] transition-all cursor-pointer group shadow-sm"
                   aria-label="Limpiar todos los repartidores del radar"
                 >
-                  <Trash2 size={14} className="group-hover:text-red-400 transition-colors" />
-                  Limpiar todo
+                  <Trash2 size={14} className="group-hover:text-red-600 transition-colors" />
+                  Limpiar todo el radar
                 </button>
               </div>
             </>
@@ -774,7 +835,7 @@ function App() {
   if (modo === 'fin') {
     return (
       <div
-        className="min-h-screen bg-white flex flex-col items-center justify-center text-stone-900 overflow-hidden relative"
+        className="min-h-screen bg-slate-50 flex flex-col items-center justify-center text-slate-900 overflow-hidden relative"
         style={{
           paddingTop: 'max(2rem, env(safe-area-inset-top))',
           paddingBottom: 'max(2rem, env(safe-area-inset-bottom))',
@@ -793,12 +854,12 @@ function App() {
           }
         `}</style>
 
-        {[...Array(50)].map((_, i) => (
+        {[...Array(40)].map((_, i) => (
           <div
             key={i}
-            className="absolute w-3 h-3 rounded-sm opacity-80 z-0"
+            className="absolute w-2.5 h-2.5 rounded-sm opacity-60 z-0"
             style={{
-              backgroundColor: ['#ef4444','#10b981','#f59e0b','#3b82f6', '#8b5cf6'][i % 5],
+              backgroundColor: ['#dc2626','#10b981','#f59e0b','#2563eb', '#7c3aed'][i % 5],
               left: `${Math.random() * 100}%`,
               top: `-5%`,
               animation: `confetti-fall ${Math.random() * 3 + 2}s linear infinite`,
@@ -808,31 +869,31 @@ function App() {
         ))}
 
         <div className="relative z-10 flex flex-col items-center w-full max-w-sm text-center animate-pop-in">
-          <div className="bg-emerald-100 text-emerald-600 p-10 rounded-full mb-6 shadow-card">
-            <CheckCircle2 size={80} strokeWidth={1.5} />
+          <div className="bg-emerald-100 border-2 border-emerald-300 text-emerald-700 p-8 rounded-full mb-6 shadow-md">
+            <CheckCircle2 size={72} strokeWidth={2} />
           </div>
           
-          <h1 className="text-5xl font-black mb-1 tracking-tight">¡RUTA</h1>
-          <h1 className="text-5xl font-black tracking-tight text-red-600 mb-8">COMPLETADA!</h1>
+          <h1 className="text-4xl font-black mb-1 tracking-tight text-slate-900">RUTA</h1>
+          <h1 className="text-4xl font-black tracking-tight text-red-600 mb-8">COMPLETADA</h1>
           
-          <div className="w-full relative h-24 mb-10 flex items-center justify-center">
-            <div className="absolute bottom-6 left-0 w-full h-0 border-t-4 border-dashed border-stone-200"></div>
-            <div className="absolute bottom-[20px] left-0 flex items-center animate-[truck-cross_4s_infinite_linear] w-full">
-              <Truck className="text-red-500 drop-shadow-md" size={48} strokeWidth={2} />
+          <div className="w-full relative h-20 mb-8 flex items-center justify-center">
+            <div className="absolute bottom-5 left-0 w-full h-0 border-t-2 border-dashed border-slate-300"></div>
+            <div className="absolute bottom-[16px] left-0 flex items-center animate-[truck-cross_4s_infinite_linear] w-full">
+              <Truck className="text-red-600 drop-shadow-sm" size={44} strokeWidth={2} />
             </div>
           </div>
 
-          <div className="flex flex-col gap-4 w-full">
-            <a
-              href={`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent("fundo el bosque 95, maipú")}`}
-              className="bg-emerald-500 text-white h-[68px] rounded-3xl w-full font-black text-base sm:text-lg active:scale-[0.97] transition-all flex items-center justify-center gap-3 shadow-[0_4px_12px_rgba(16,185,129,0.3),0_8px_24px_rgba(16,185,129,0.2)] cursor-pointer tracking-wider"
+          <div className="flex flex-col gap-3 w-full">
+            <button
+              onClick={() => abrirNavegacion("fundo el bosque 95, maipú")}
+              className="bg-emerald-600 hover:bg-emerald-700 text-white h-[66px] rounded-3xl w-full font-black text-base active:scale-[0.98] transition-all flex items-center justify-center gap-3 shadow-emerald cursor-pointer tracking-wider"
             >
-              <Home size={22} /> ¡VAMOS A CASA!
-            </a>
+              <Home size={22} /> VAMOS A CASA
+            </button>
             
             <button
               onClick={limpiarTodo}
-              className="bg-stone-100 text-stone-700 h-[68px] rounded-3xl w-full font-black text-sm sm:text-base active:scale-95 transition-transform shadow-card cursor-pointer tracking-wider"
+              className="bg-white border-2 border-slate-300 text-slate-800 h-[64px] rounded-3xl w-full font-black text-sm active:scale-[0.98] transition-all cursor-pointer tracking-wider hover:bg-slate-100 shadow-sm"
             >
               VOLVER AL INICIO
             </button>
@@ -845,7 +906,7 @@ function App() {
   if (pedidos.length === 0) {
     return (
       <div
-        className="min-h-screen bg-stone-50 flex flex-col justify-center max-w-xl mx-auto overflow-y-auto relative"
+        className="min-h-screen bg-slate-50 flex flex-col justify-center max-w-xl mx-auto overflow-y-auto relative text-slate-900"
         style={{
           paddingTop: 'max(1.5rem, env(safe-area-inset-top))',
           paddingBottom: 'max(1.5rem, env(safe-area-inset-bottom))',
@@ -864,72 +925,77 @@ function App() {
             WebkitUserSelect: 'none',
             touchAction: 'none'
           }}
+          aria-label="Acceso panel admin"
         >
           <div className="relative">
-            <Zap size={22} className="text-stone-300" />
-            <div className="absolute top-7 right-0 h-1 bg-red-500 transition-all duration-75 rounded-full" style={{ width: `${adminProgress}%` }} />
+            <Zap size={22} className="text-slate-300 hover:text-slate-500 transition-colors" />
+            <div className="absolute top-7 right-0 h-1 bg-red-600 transition-all duration-75 rounded-full" style={{ width: `${adminProgress}%` }} />
           </div>
         </button>
-        <div className="mb-10 text-center flex flex-col items-center animate-slide-up mt-10">
-          <img src="/logo.png" alt="Logo Full Canapé" className="w-32 h-auto mb-5 drop-shadow-md" />
-          <h1 className="text-4xl font-black text-stone-900 tracking-tight leading-none">Full Canapé</h1>
-          <p className="text-stone-400 font-semibold mt-2 text-sm tracking-wider uppercase">Sistema logístico de ruta</p>
+
+        <div className="mb-8 text-center flex flex-col items-center animate-slide-up mt-6">
+          <img src="/logo.png" alt="Logo Full Canapé" className="w-28 h-auto mb-4 drop-shadow-sm" />
+          <h1 className="text-3xl font-black text-slate-900 tracking-tight leading-none">Full Canapé</h1>
+          <p className="text-slate-600 font-bold mt-2 text-xs tracking-wider uppercase">Sistema logístico de reparto</p>
         </div>
 
-        <div className="animate-slide-up" style={{ animationDelay: '60ms' }}>
-          <label className="block text-xs font-black text-stone-400 uppercase tracking-widest mb-3 pl-1">
+        <div className="animate-slide-up" style={{ animationDelay: '50ms' }}>
+          <label className="block text-xs font-black text-slate-700 uppercase tracking-widest mb-2 pl-1">
             Pegar pedidos aquí
           </label>
           <textarea
-            className="w-full h-52 p-5 bg-white rounded-3xl border-2 border-stone-200 mb-5 outline-none text-base resize-none font-medium text-stone-800 placeholder:text-stone-300 placeholder:font-normal focus:border-red-500 transition-colors duration-200 shadow-card"
-            placeholder="Pega los pedidos aquí..."
+            className="w-full h-48 p-4 bg-white rounded-3xl border-2 border-slate-300 mb-4 outline-none text-base resize-none font-medium text-slate-900 placeholder:text-slate-400 focus:border-red-600 transition-colors shadow-sm"
+            placeholder="Pega los pedidos aquí (WhatsApp)..."
             value={input}
             onChange={(e) => setInput(e.target.value)}
           />
         </div>
 
-        <div className="flex flex-col gap-3 animate-slide-up" style={{ animationDelay: '120ms' }}>
+        <div className="flex flex-col gap-3 animate-slide-up" style={{ animationDelay: '100ms' }}>
           <button
             onClick={handleProcesar}
             disabled={cargando || !input.trim()}
-            className={`h-[68px] rounded-3xl font-black text-base transition-all duration-200 cursor-pointer flex items-center justify-center gap-3 ${cargando || !input.trim() ? 'bg-stone-300 text-stone-500 cursor-not-allowed' : 'bg-red-600 text-white shadow-cta active:scale-[0.97]'}`}
+            className={`h-[66px] rounded-3xl font-black text-base transition-all duration-200 cursor-pointer flex items-center justify-center gap-3 ${
+              cargando || !input.trim() 
+                ? 'bg-slate-200 text-slate-400 cursor-not-allowed border-2 border-slate-300' 
+                : 'bg-red-600 hover:bg-red-700 text-white shadow-cta active:scale-[0.98]'
+            }`}
           >
-            {cargando ? <><Loader2 className="animate-spin" size={22} /> PROCESANDO...</> : <><Package size={22} /> CARGAR RUTA</>}
+            {cargando ? <><Loader2 className="animate-spin" size={22} /> PROCESANDO RUTA...</> : <><Package size={22} /> CARGAR RUTA</>}
           </button>
 
           {historial && (
             <button
               onClick={restaurarUltima}
-              className="h-[56px] rounded-3xl font-bold text-stone-600 bg-white border-2 border-stone-200 flex items-center justify-center gap-2 hover:bg-stone-50 transition-colors shadow-card cursor-pointer"
+              className="h-[54px] rounded-3xl font-bold text-slate-800 bg-white border-2 border-slate-300 flex items-center justify-center gap-2 hover:bg-slate-50 active:scale-[0.98] transition-all shadow-sm cursor-pointer"
             >
               <RefreshCcw size={16} /> RESTAURAR ÚLTIMA CARGA
             </button>
           )}
 
-          {/* Botón de activación de alertas push (solo visible si el dispositivo las soporta) */}
           {pushEstado !== 'unsupported' && (
             <button
               onClick={activarPush}
               disabled={pushEstado === 'requesting' || pushEstado === 'denied'}
-              className={`h-[52px] rounded-3xl font-bold text-sm flex items-center justify-center gap-2.5 transition-all duration-200 cursor-pointer border-2 ${
+              className={`h-[50px] rounded-3xl font-bold text-xs flex items-center justify-center gap-2.5 transition-all duration-200 cursor-pointer border-2 ${
                 pushEstado === 'granted'
-                  ? 'bg-emerald-50 border-emerald-200 text-emerald-700 cursor-default'
+                  ? 'bg-emerald-50 border-emerald-300 text-emerald-800 cursor-default shadow-sm'
                   : pushEstado === 'denied'
-                  ? 'bg-stone-50 border-stone-200 text-stone-400 cursor-not-allowed'
+                  ? 'bg-slate-100 border-slate-200 text-slate-400 cursor-not-allowed'
                   : pushEstado === 'requesting'
-                  ? 'bg-stone-50 border-stone-200 text-stone-400 cursor-wait'
-                  : 'bg-stone-50 border-stone-200 text-stone-600 hover:border-stone-300 hover:bg-stone-100 active:scale-[0.97]'
+                  ? 'bg-slate-100 border-slate-200 text-slate-500 cursor-wait'
+                  : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50 active:scale-[0.98] shadow-sm'
               }`}
               aria-label="Activar notificaciones push para el administrador"
             >
               {pushEstado === 'granted' ? (
-                <><Bell size={16} className="text-emerald-600" /> Alertas activas</>
+                <><Bell size={15} className="text-emerald-700" /> Alertas push activas</>
               ) : pushEstado === 'denied' ? (
-                <><BellOff size={16} /> Alertas bloqueadas en ajustes</>
+                <><BellOff size={15} /> Alertas bloqueadas en ajustes</>
               ) : pushEstado === 'requesting' ? (
-                <><Loader2 size={16} className="animate-spin" /> Activando...</>
+                <><Loader2 size={15} className="animate-spin" /> Activando alertas...</>
               ) : (
-                <><Bell size={16} /> Activar alertas al admin</>
+                <><Bell size={15} /> Activar alertas al admin</>
               )}
             </button>
           )}
@@ -942,7 +1008,7 @@ function App() {
 
   return (
     <div
-      className="min-h-screen bg-stone-100 flex flex-col relative max-w-7xl mx-auto"
+      className="min-h-screen bg-slate-100 flex flex-col relative max-w-7xl mx-auto text-slate-900"
       style={{
         paddingTop: 'max(1rem, env(safe-area-inset-top))',
         paddingBottom: 'max(1rem, env(safe-area-inset-bottom))',
@@ -950,7 +1016,6 @@ function App() {
         paddingRight: 'max(1rem, env(safe-area-inset-right))'
       }}
     >
-      {/* CSS GLOBAL PARA EL JIGGLE MODE (MODO IOS) */}
       <style>{`
         @keyframes jiggle {
           0% { transform: rotate(-1deg); }
@@ -964,42 +1029,49 @@ function App() {
 
       <div className={`fixed inset-0 bg-white z-[100] transition-all duration-700 pointer-events-none ${absorbiendo ? 'opacity-100 scale-150 rounded-none' : 'opacity-0 scale-0 rounded-full'}`} style={{ transformOrigin: 'bottom center' }} />
 
-      {/* --- NUEVO MODAL MULTICONTROL DE TELÉFONOS --- */}
+      {/* Modal Multicontrol de Teléfonos Faltantes */}
       {alertaSinTelefono && (
-        <div className="fixed inset-0 bg-stone-950/80 z-[300] flex items-center justify-center p-4 sm:p-6 animate-pop-in">
-          <div className="bg-white rounded-[2rem] p-6 max-w-sm w-full shadow-2xl flex flex-col max-h-[90vh]">
+        <div className="fixed inset-0 bg-slate-600/30 backdrop-blur-sm z-[300] flex items-center justify-center p-4 sm:p-6 animate-pop-in">
+          <div className="bg-white border-2 border-slate-300 rounded-[2rem] p-6 max-w-sm w-full shadow-2xl flex flex-col max-h-[90vh]">
             
-            <div className="flex flex-col items-center text-center mb-6 shrink-0">
-              <div className="bg-amber-100 text-amber-600 p-4 rounded-full w-16 h-16 flex items-center justify-center mb-4">
-                <AlertTriangle size={32} strokeWidth={2.5} />
+            <div className="flex flex-col items-center text-center mb-5 shrink-0">
+              <div className="bg-amber-100 border border-amber-300 text-amber-700 p-4 rounded-full w-16 h-16 flex items-center justify-center mb-3">
+                <AlertTriangle size={30} strokeWidth={2.5} />
               </div>
-              <h3 className="text-2xl font-black text-stone-900 mb-2 leading-tight tracking-tight">Faltan Teléfonos</h3>
-              <p className="text-stone-500 text-sm font-medium leading-relaxed">
-                A las siguientes <strong className="text-stone-900">{alertaSinTelefono.length}</strong> paradas les falta el número:
+              <h3 className="text-xl font-black text-slate-900 mb-1 tracking-tight">Faltan Teléfonos</h3>
+              <p className="text-slate-700 text-xs font-semibold leading-relaxed">
+                A las siguientes <strong className="text-slate-900">{alertaSinTelefono.length}</strong> paradas les falta el número móvil:
               </p>
             </div>
 
-            <div className="flex-1 overflow-y-auto space-y-3 mb-6 pr-1">
+            <div className="flex-1 overflow-y-auto space-y-2.5 mb-5 pr-1">
               {alertaSinTelefono.map((p) => (
-                <div key={p.originalIndex} className="bg-stone-50 p-4 rounded-2xl border border-stone-100">
-                  <p className="text-[10px] font-black text-red-500 uppercase tracking-widest mb-1">Parada {p.originalIndex + 1}</p>
-                  <p className="text-sm font-bold text-stone-800 leading-snug mb-3 truncate">{p.direccion}</p>
+                <div key={p.originalIndex} className="bg-slate-50 p-4 rounded-2xl border-2 border-slate-200">
+                  <p className="text-[10px] font-black text-red-600 uppercase tracking-widest mb-1">Parada {p.originalIndex + 1}</p>
+                  <p className="text-sm font-bold text-slate-900 leading-snug mb-3 truncate">{p.direccion}</p>
                   
                   {modalEditId === p.originalIndex ? (
                     <div className="flex gap-2">
                       <input
-                        type="number"
+                        type="tel"
                         value={modalEditPhone}
                         onChange={e => setModalEditPhone(e.target.value)}
-                        placeholder="Ej: 569..."
-                        className="flex-1 bg-white border-2 border-stone-200 rounded-xl px-3 py-2 text-sm font-bold outline-none focus:border-red-400"
+                        placeholder="Ej: 56912345678"
+                        className="flex-1 bg-white border-2 border-slate-300 text-slate-900 rounded-xl px-3 py-2 text-sm font-bold outline-none focus:border-red-600 shadow-sm"
                       />
-                      <button onClick={() => guardarTelefonoModal(p.originalIndex)} className="bg-emerald-500 text-white p-2 rounded-xl shadow-sm active:scale-95 cursor-pointer">
+                      <button 
+                        onClick={() => guardarTelefonoModal(p.originalIndex)} 
+                        className="bg-emerald-600 hover:bg-emerald-700 text-white p-2.5 rounded-xl shadow-sm active:scale-95 cursor-pointer"
+                        aria-label="Guardar teléfono"
+                      >
                         <Save size={16} />
                       </button>
                     </div>
                   ) : (
-                    <button onClick={() => { setModalEditId(p.originalIndex); setModalEditPhone(''); }} className="w-full flex items-center justify-center gap-2 bg-white border-2 border-stone-200 text-stone-500 py-2 rounded-xl text-xs font-black hover:border-stone-300 active:scale-95 transition-all cursor-pointer">
+                    <button 
+                      onClick={() => { setModalEditId(p.originalIndex); setModalEditPhone(''); }} 
+                      className="w-full flex items-center justify-center gap-2 bg-white border-2 border-slate-300 text-slate-800 py-2.5 rounded-xl text-xs font-black hover:border-slate-400 active:scale-95 transition-all cursor-pointer shadow-sm"
+                    >
                       <Pencil size={12} /> AGREGAR TELÉFONO
                     </button>
                   )}
@@ -1009,7 +1081,7 @@ function App() {
 
             <button
               onClick={() => { setAlertaSinTelefono(null); cambiarAModoReparto(); }}
-              className="w-full shrink-0 bg-stone-900 text-white h-[60px] rounded-2xl font-black text-sm active:scale-[0.97] transition-transform shadow-dark cursor-pointer tracking-wider"
+              className="w-full shrink-0 bg-white border-2 border-slate-300 hover:bg-slate-100 text-slate-800 h-[58px] rounded-2xl font-black text-sm active:scale-[0.98] transition-transform cursor-pointer tracking-wider shadow-sm"
             >
               CONTINUAR DE TODAS FORMAS
             </button>
@@ -1017,37 +1089,39 @@ function App() {
         </div>
       )}
 
+      {/* Barra superior de controles */}
       <div className="flex justify-between items-center mb-4 px-1">
         <button
           onPointerDown={startReset}
           onPointerUp={stopReset}
           onPointerLeave={stopReset}
           aria-label="Mantén presionado para reiniciar"
-          className="relative overflow-hidden bg-white text-stone-500 px-5 py-3 rounded-2xl font-bold text-xs flex items-center gap-2 active:scale-95 transition-all duration-150 select-none touch-none cursor-pointer shadow-card border border-stone-100"
+          className="relative overflow-hidden bg-white text-slate-700 px-5 py-3 rounded-2xl font-bold text-xs flex items-center gap-2 active:scale-95 transition-all select-none touch-none cursor-pointer shadow-sm border-2 border-slate-200"
           style={{ WebkitUserSelect: 'none' }}
         >
-          <div className="absolute bottom-0 left-0 h-[3px] bg-red-500 transition-all duration-75 rounded-full" style={{ width: `${resetProgress}%` }} />
+          <div className="absolute bottom-0 left-0 h-[3px] bg-red-600 transition-all duration-75 rounded-full" style={{ width: `${resetProgress}%` }} />
           <RefreshCcw size={14} className={resetProgress > 0 ? 'animate-spin' : ''} />
           <span className="tracking-wider">{resetProgress > 0 ? 'MANTÉN...' : 'REINICIAR'}</span>
         </button>
 
         <button
-          onClick={() => setShowReorder(true)}
-          className="bg-stone-900 text-white px-5 py-3 rounded-2xl font-bold text-xs flex items-center gap-2 active:scale-95 transition-all duration-150 shadow-dark cursor-pointer hover:bg-stone-800"
+          onClick={() => { dispararHaptico(15); setShowReorder(true); }}
+          className="bg-white text-slate-900 border-2 border-slate-200 px-5 py-3 rounded-2xl font-black text-xs flex items-center gap-2 active:scale-95 transition-all shadow-sm cursor-pointer hover:bg-slate-50"
         >
           <ListOrdered size={14} />
           <span className="tracking-wider">COLA DE REPARTO</span>
         </button>
       </div>
 
+      {/* Modal Cola de Reparto */}
       {showReorder && (
-        <div className="fixed inset-0 bg-stone-950/96 z-[200] p-6 flex flex-col overflow-y-auto">
-          <div className="flex justify-between items-center mb-8">
+        <div className="fixed inset-0 bg-slate-100/98 backdrop-blur-md z-[200] p-6 flex flex-col overflow-y-auto text-slate-900">
+          <div className="flex justify-between items-center mb-6">
             <div>
-              <p className="text-red-500 text-xs font-black uppercase tracking-widest mb-1">Ordenar paradas</p>
-              <h2 className="text-white text-3xl font-black tracking-tight">COLA DE REPARTO</h2>
+              <p className="text-red-600 text-xs font-black uppercase tracking-widest mb-1">Ordenar paradas</p>
+              <h2 className="text-slate-900 text-3xl font-black tracking-tight">COLA DE REPARTO</h2>
             </div>
-            <button onClick={() => setShowReorder(false)} className="bg-white/10 p-3 rounded-2xl text-white hover:bg-white/20 transition-colors cursor-pointer">
+            <button onClick={() => setShowReorder(false)} className="bg-white border-2 border-slate-300 p-3 rounded-2xl text-slate-700 hover:bg-slate-200 transition-colors cursor-pointer shadow-sm" aria-label="Cerrar modal de orden">
               <X size={20} />
             </button>
           </div>
@@ -1069,28 +1143,30 @@ function App() {
               }
 
               return (
-                <div key={p.id || p.cliente + p.direccion} className={`flex items-center p-5 rounded-3xl border-2 relative ${transClasses} ${i === index ? 'bg-red-600 border-red-400 shadow-cta' : 'bg-white/5 border-white/10 hover:bg-white/8'} ${animClasses}`}>
+                <div key={p.id || p.cliente + p.direccion} className={`flex items-center p-4 sm:p-5 rounded-3xl border-2 relative ${transClasses} ${i === index ? 'bg-red-50 border-red-500 shadow-md' : 'bg-white border-slate-200 hover:border-slate-300 shadow-sm'} ${animClasses}`}>
                   <div className="flex-1 pr-3 min-w-0">
-                    <p className={`text-[10px] font-black uppercase tracking-widest mb-1 ${i === index ? 'text-red-200' : 'text-white/40'}`}>
+                    <p className={`text-[10px] font-black uppercase tracking-widest mb-1 ${i === index ? 'text-red-700' : 'text-slate-500'}`}>
                       Parada {i + 1} {i === index && ' · EN CURSO'}
                     </p>
-                    <p className="text-white font-bold leading-tight truncate">{p.direccion}</p>
-                    <p className={`text-[11px] mt-1 font-semibold ${i === index ? 'text-red-200' : 'text-white/40'}`}>{p.cliente}</p>
+                    <p className="text-slate-900 font-bold leading-tight truncate">{p.direccion}</p>
+                    <p className={`text-[11px] mt-1 font-semibold ${i === index ? 'text-red-600' : 'text-slate-600'}`}>{p.cliente}</p>
                   </div>
                   <div className="flex flex-col gap-2 shrink-0 relative z-30">
                     <button 
                       onClick={() => moverPedidoConAnimacion(i, i - 1)} 
                       disabled={i === 0 || animatingMover !== null} 
-                      className="p-3 bg-white/10 rounded-xl disabled:opacity-20 hover:bg-white/20 transition-colors active:scale-90 cursor-pointer"
+                      className="p-3 bg-slate-100 border border-slate-300 rounded-xl disabled:opacity-20 hover:bg-slate-200 transition-colors active:scale-90 cursor-pointer text-slate-800"
+                      aria-label="Subir parada"
                     >
-                      <ArrowUp size={16} className="text-white" />
+                      <ArrowUp size={16} />
                     </button>
                     <button 
                       onClick={() => moverPedidoConAnimacion(i, i + 1)} 
                       disabled={i === pedidos.length - 1 || animatingMover !== null} 
-                      className="p-3 bg-white/10 rounded-xl disabled:opacity-20 hover:bg-white/20 transition-colors active:scale-90 cursor-pointer"
+                      className="p-3 bg-slate-100 border border-slate-300 rounded-xl disabled:opacity-20 hover:bg-slate-200 transition-colors active:scale-90 cursor-pointer text-slate-800"
+                      aria-label="Bajar parada"
                     >
-                      <ArrowDown size={16} className="text-white" />
+                      <ArrowDown size={16} />
                     </button>
                   </div>
                 </div>
@@ -1098,17 +1174,18 @@ function App() {
             })}
           </div>
 
-          <button onClick={() => setShowReorder(false)} className="sticky bottom-4 bg-white text-stone-900 py-5 rounded-[2rem] font-black text-lg w-full shadow-[0_8px_32px_rgba(0,0,0,0.3)] active:scale-[0.97] transition-transform cursor-pointer">
+          <button onClick={() => setShowReorder(false)} className="sticky bottom-4 bg-red-600 hover:bg-red-700 text-white py-5 rounded-[2rem] font-black text-base w-full shadow-cta active:scale-[0.98] transition-transform cursor-pointer">
             CONFIRMAR ORDEN
           </button>
         </div>
       )}
 
-      <div className="bg-white p-1.5 rounded-2xl flex mb-4 shadow-card border border-stone-100 shrink-0">
+      {/* Selector de Modo (Check-in vs Reparto) */}
+      <div className="bg-slate-200/90 p-1.5 rounded-2xl flex mb-4 shadow-sm border border-slate-300 shrink-0">
         <button
-          onClick={() => setModo('carga')}
+          onClick={() => { dispararHaptico(15); setModo('carga'); }}
           className={`flex-1 py-3.5 rounded-xl font-black text-xs sm:text-sm transition-all duration-200 cursor-pointer ${
-            modo === 'carga' ? 'bg-red-600 text-white shadow-cta scale-[1.02]' : 'text-stone-400 hover:text-stone-700'
+            modo === 'carga' ? 'bg-red-600 text-white shadow-cta scale-[1.01]' : 'text-slate-700 hover:text-slate-900'
           }`}
         >
           1 · CHECK-IN
@@ -1117,56 +1194,50 @@ function App() {
           onClick={intentarComenzarRuta}
           disabled={!todoCargado}
           className={`flex-1 py-3.5 rounded-xl font-black text-xs sm:text-sm transition-all duration-200 cursor-pointer ${
-            modo === 'reparto' ? 'bg-red-600 text-white shadow-cta scale-[1.02]' : 'text-stone-400 hover:text-stone-700 disabled:opacity-30 disabled:cursor-not-allowed'
+            modo === 'reparto' ? 'bg-red-600 text-white shadow-cta scale-[1.01]' : 'text-slate-700 hover:text-slate-900 disabled:opacity-30 disabled:cursor-not-allowed'
           }`}
         >
           2 · EN RUTA
         </button>
       </div>
 
-      <div className="flex-1 bg-white rounded-[2.5rem] p-6 sm:p-8 shadow-card card-accent-top flex flex-col relative animate-slide-up">
-        <div className="flex items-center justify-between mb-7 bg-stone-50 p-2 rounded-2xl border border-stone-100">
-          <button onClick={retroceder} disabled={index === 0} aria-label="Parada anterior" className="w-14 h-14 flex items-center justify-center bg-white text-stone-700 rounded-xl shadow-card disabled:opacity-25 active:scale-90 transition-all duration-150 cursor-pointer border border-stone-100"><ChevronLeft size={26} strokeWidth={2.5} /></button>
+      {/* Contenedor Principal de la Tarjeta */}
+      <div className="flex-1 bg-white rounded-[2.5rem] p-6 sm:p-8 shadow-card card-accent-top flex flex-col relative animate-slide-up border-2 border-slate-200/90">
+        <div className="flex items-center justify-between mb-6 bg-slate-50 p-2 rounded-2xl border border-slate-200">
+          <button onClick={retroceder} disabled={index === 0} aria-label="Parada anterior" className="w-14 h-14 flex items-center justify-center bg-white text-slate-800 rounded-xl shadow-sm disabled:opacity-25 active:scale-95 transition-all cursor-pointer border-2 border-slate-200"><ChevronLeft size={26} strokeWidth={2.5} /></button>
           <div className="text-center">
             <p className="text-red-600 text-xs font-black uppercase tracking-widest">Parada</p>
-            <p className="text-stone-900 text-2xl font-black leading-none">{index + 1}<span className="text-stone-300 font-semibold text-lg"> / {pedidos.length}</span></p>
+            <p className="text-slate-900 text-2xl font-black leading-none">{index + 1}<span className="text-slate-400 font-semibold text-lg"> / {pedidos.length}</span></p>
           </div>
-          <button onClick={avanzar} disabled={index === pedidos.length - 1} aria-label="Parada siguiente" className="w-14 h-14 flex items-center justify-center bg-white text-stone-700 rounded-xl shadow-card disabled:opacity-25 active:scale-90 transition-all duration-150 cursor-pointer border border-stone-100"><ChevronRight size={26} strokeWidth={2.5} /></button>
+          <button onClick={avanzar} disabled={index === pedidos.length - 1} aria-label="Parada siguiente" className="w-14 h-14 flex items-center justify-center bg-white text-slate-800 rounded-xl shadow-sm disabled:opacity-25 active:scale-95 transition-all cursor-pointer border-2 border-slate-200"><ChevronRight size={26} strokeWidth={2.5} /></button>
         </div>
 
-        {/* Envuelve todo el contenido dinámico (cliente, dirección, items) en una
-            capa de transición. slideVisible se pone en false 180ms cuando index
-            cambia, forzando el fade-out+slide-out antes del nuevo contenido. */}
         <div
-          className={`grid grid-cols-1 lg:grid-cols-2 gap-6 lg:gap-10 flex-1 transition-all duration-300 ease-out ${
-            slideVisible
-              ? 'opacity-100 translate-x-0'
-              : 'opacity-0 translate-x-3'
+          className={`grid grid-cols-1 lg:grid-cols-2 gap-6 lg:gap-10 flex-1 transition-all duration-200 ease-out ${
+            slideVisible ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-2'
           }`}
         >
           <div className="flex flex-col gap-5">
-            
-            {/* INICIO BLOQUE: LÁPIZ Y DATOS DEL CLIENTE */}
             {modoEdicion ? (
-              <div className="animate-jiggle bg-stone-100/50 p-5 rounded-[2rem] border-2 border-stone-200 shadow-inner flex flex-col gap-4 relative z-10">
+              <div className="animate-jiggle bg-slate-50 p-5 rounded-[2rem] border-2 border-slate-300 shadow-sm flex flex-col gap-4 relative z-10">
                 <div className="flex items-center justify-between mb-1">
-                  <p className="text-xs font-black text-stone-500 uppercase tracking-widest flex items-center gap-2">
-                    <Pencil size={14}/> Editando Datos
+                  <p className="text-xs font-black text-slate-600 uppercase tracking-widest flex items-center gap-2">
+                    <Pencil size={14}/> Editando Parada
                   </p>
                 </div>
                 <input 
                   type="text" value={formEdicion.cliente} onChange={e => setFormEdicion({...formEdicion, cliente: e.target.value})}
-                  className="w-full bg-white border-2 border-stone-200 rounded-xl px-4 py-3 font-black text-stone-900 text-lg outline-none focus:border-red-400 shadow-sm" placeholder="Nombre del cliente"
+                  className="w-full bg-white border-2 border-slate-300 rounded-xl px-4 py-3 font-black text-slate-900 text-base outline-none focus:border-red-600 shadow-sm" placeholder="Horario / Cliente"
                 />
                 <input 
-                  type="number" value={formEdicion.telefono} onChange={e => setFormEdicion({...formEdicion, telefono: e.target.value})}
-                  className="w-full bg-white border-2 border-stone-200 rounded-xl px-4 py-3 font-bold text-stone-700 outline-none focus:border-red-400 shadow-sm" placeholder="Teléfono (ej: 569...)"
+                  type="tel" value={formEdicion.telefono} onChange={e => setFormEdicion({...formEdicion, telefono: e.target.value})}
+                  className="w-full bg-white border-2 border-slate-300 rounded-xl px-4 py-3 font-bold text-slate-800 outline-none focus:border-red-600 shadow-sm" placeholder="Teléfono (ej: 56912345678)"
                 />
                 <textarea 
                   value={formEdicion.direccion} onChange={e => setFormEdicion({...formEdicion, direccion: e.target.value})}
-                  className="w-full bg-white border-2 border-stone-200 rounded-xl px-4 py-3 font-bold text-stone-700 outline-none focus:border-red-400 shadow-sm resize-none h-24" placeholder="Dirección exacta"
+                  className="w-full bg-white border-2 border-slate-300 rounded-xl px-4 py-3 font-bold text-slate-800 outline-none focus:border-red-600 shadow-sm resize-none h-24" placeholder="Dirección completa"
                 />
-                <button onClick={guardarEdicion} className="mt-2 w-full bg-emerald-500 text-white font-black py-4 rounded-2xl shadow-wa active:scale-95 flex items-center justify-center gap-2 cursor-pointer transition-transform">
+                <button onClick={guardarEdicion} className="mt-2 w-full bg-emerald-600 hover:bg-emerald-700 text-white font-black py-4 rounded-2xl shadow-emerald active:scale-[0.98] flex items-center justify-center gap-2 cursor-pointer transition-transform">
                   <Save size={18}/> GUARDAR CAMBIOS
                 </button>
               </div>
@@ -1175,74 +1246,80 @@ function App() {
                 <div className="flex items-start justify-between gap-4">
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-3 mb-1">
-                      <p className="text-xs font-black text-stone-400 uppercase tracking-widest">Cliente</p>
+                      <p className="text-xs font-black text-slate-500 uppercase tracking-widest">Cliente / Horario</p>
                       
-                      {/* BOTÓN FANTASMA: LÁPIZ */}
                       <button
                         onPointerDown={startEditPress}
                         onPointerUp={stopEditPress}
                         onPointerLeave={stopEditPress}
-                        className="relative overflow-hidden bg-stone-100 p-1.5 rounded-lg text-stone-400 active:scale-90 transition-transform cursor-pointer shadow-sm"
+                        className="relative overflow-hidden bg-slate-100 p-1.5 rounded-lg text-slate-600 active:scale-90 transition-transform cursor-pointer shadow-sm border border-slate-300 hover:bg-slate-200"
                         style={{ WebkitUserSelect: 'none', touchAction: 'none' }}
+                        aria-label="Mantener para editar datos"
                       >
-                        <div className="absolute bottom-0 left-0 h-full bg-stone-300 transition-all" style={{ width: `${editProgress}%` }} />
+                        <div className="absolute bottom-0 left-0 h-full bg-slate-300 transition-all" style={{ width: `${editProgress}%` }} />
                         <Pencil size={12} className="relative z-10" />
                       </button>
                     </div>
                     
-                    <h2 className="text-2xl sm:text-3xl font-black text-stone-900 leading-tight tracking-tight wrap-break-word">
-                      {pedidoActual.cliente.startsWith('569') ? 'Cliente Web' : pedidoActual.cliente}
+                    <h2 className="text-2xl sm:text-3xl font-black text-slate-900 leading-tight tracking-tight break-words">
+                      {pedidoActual?.cliente?.startsWith('569') ? 'Cliente Web' : (pedidoActual?.cliente || 'Cliente')}
                     </h2>
-                    {pedidoActual.telefono && (
-                      <a href={`tel:+${pedidoActual.telefono}`} className="mt-2 inline-flex items-center gap-2 text-sm font-bold text-stone-400 hover:text-stone-600 transition-colors">
-                        <Phone size={13} /> +{pedidoActual.telefono}
+                    {pedidoActual?.telefono && (
+                      <a href={`tel:+${pedidoActual.telefono}`} className="mt-2 inline-flex items-center gap-2 text-sm font-bold text-slate-600 hover:text-slate-900 transition-colors">
+                        <Phone size={13} /> {formatearTelefonoVisual(pedidoActual.telefono)}
                       </a>
                     )}
                   </div>
                   <BotonRayo />
                 </div>
 
-                <div className="bg-stone-50 p-4 rounded-2xl border border-stone-100 flex items-start gap-3">
+                <div className="bg-slate-50 p-4 rounded-2xl border-2 border-slate-200 flex items-start gap-3">
                   <div className="bg-red-100 p-2 rounded-xl shrink-0"><MapPin size={16} className="text-red-600" /></div>
-                  <p className="text-sm font-bold text-stone-700 leading-snug">{pedidoActual.direccion}</p>
+                  <p className="text-sm font-bold text-slate-900 leading-snug">{pedidoActual?.direccion}</p>
                 </div>
               </>
             )}
-            {/* FIN BLOQUE: LÁPIZ Y DATOS */}
 
             {modo === 'reparto' && (
               <>
                 <button
-                  onClick={() => abrirMapa(pedidoActual.direccion)}
-                  className="w-full bg-stone-900 text-white h-[60px] rounded-2xl font-black flex justify-center items-center gap-3 active:scale-[0.97] transition-all duration-200 text-sm shadow-dark cursor-pointer hover:bg-stone-800 group"
+                  onClick={() => abrirNavegacion(pedidoActual?.direccion)}
+                  className="w-full bg-blue-600 hover:bg-blue-700 text-white h-[60px] rounded-2xl font-black flex justify-center items-center gap-3 active:scale-[0.98] transition-all text-sm shadow-md cursor-pointer group"
                 >
-                  <Map size={20} className="group-active:scale-110 transition-transform duration-150" />
+                  <Map size={20} className="group-active:scale-110 transition-transform" />
                   NAVEGAR CON MAPS
                 </button>
 
-                <div className="bg-stone-50 p-5 rounded-3xl border-2 border-stone-100">
-                  <h3 className="text-[10px] font-black text-stone-400 uppercase tracking-widest mb-4 flex items-center gap-2">
+                <div className="bg-slate-50 p-5 rounded-3xl border-2 border-slate-200">
+                  <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
                     <MessageCircle size={13} /> Avisos automáticos
                   </h3>
 
                   <div className="flex gap-3 mb-3">
                     <div className="relative shrink-0">
-                      <input type="number" value={eta} onChange={(e) => setEta(e.target.value)} placeholder="–" aria-label="Minutos estimados de llegada" className="w-[68px] h-[52px] text-center font-black bg-white border-2 border-stone-200 rounded-2xl outline-none text-stone-900 focus:border-red-400 transition-colors text-lg" />
-                      <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 bg-stone-100 text-[9px] px-2 py-0.5 font-black text-stone-500 rounded-full tracking-wider">MIN</span>
+                      <input 
+                        type="number" 
+                        value={eta} 
+                        onChange={(e) => setEta(e.target.value)} 
+                        placeholder="–" 
+                        aria-label="Minutos estimados de llegada" 
+                        className="w-[68px] h-[52px] text-center font-black bg-white border-2 border-slate-300 rounded-2xl outline-none text-slate-900 focus:border-red-600 transition-colors text-lg shadow-sm" 
+                      />
+                      <span className="absolute -top-2.5 left-1/2 -translate-x-1/2 bg-slate-200 text-[9px] px-2 py-0.5 font-black text-slate-700 rounded-full tracking-wider border border-slate-300">MIN</span>
                     </div>
 
-                    {pedidoActual.telefono ? (
+                    {pedidoActual?.telefono ? (
                       <button
                         onClick={enviarAvisoCliente}
                         disabled={!eta}
-                        className="flex-1 bg-[#25D366] text-white font-black h-[52px] rounded-2xl active:scale-[0.97] transition-all duration-150 flex items-center justify-center text-xs gap-2 shadow-wa disabled:opacity-40 disabled:saturate-0 cursor-pointer tracking-wider hover:brightness-105"
+                        className="flex-1 bg-[#25D366] text-white font-black h-[52px] rounded-2xl active:scale-[0.98] transition-all flex items-center justify-center text-xs gap-2 shadow-wa disabled:opacity-40 disabled:saturate-0 cursor-pointer tracking-wider hover:brightness-105"
                       >
                         <MessageCircle size={15} /> AVISAR SALIDA
                       </button>
                     ) : (
                       <button
                         onClick={pedirTelefonoAdmin}
-                        className="flex-1 bg-stone-800 text-white font-black h-[52px] rounded-2xl active:scale-[0.97] transition-all duration-150 flex items-center justify-center text-[10px] sm:text-xs gap-2 shadow-dark cursor-pointer tracking-wider hover:bg-stone-700"
+                        className="flex-1 bg-amber-100 hover:bg-amber-200 text-amber-900 border-2 border-amber-300 font-black h-[52px] rounded-2xl active:scale-[0.98] transition-all flex items-center justify-center text-xs gap-2 shadow-sm cursor-pointer tracking-wider"
                       >
                         <MessageCircle size={15} /> PEDIR TELÉFONO
                       </button>
@@ -1250,21 +1327,20 @@ function App() {
                   </div>
 
                   <div className="flex gap-2">
-                    {pedidoActual.telefono && (
+                    {pedidoActual?.telefono && (
                       <button
                         onClick={enviarAvisoLlegada}
-                        className="flex-1 bg-white border-2 border-[#25D366] text-[#25D366] font-black py-3 rounded-xl text-xs active:scale-95 transition-all duration-150 cursor-pointer tracking-wider hover:bg-[#25D366]/5"
+                        className="flex-1 bg-white border-2 border-[#25D366] text-[#25D366] font-black py-3 rounded-xl text-xs active:scale-95 transition-all cursor-pointer tracking-wider hover:bg-[#25D366]/5 shadow-sm"
                       >
                         ESTOY AFUERA
                       </button>
                     )}
-                    {/* Chat vacío: para que el repartidor escriba libremente */}
-                    {pedidoActual.telefono && (
+                    {pedidoActual?.telefono && (
                       <button
                         onClick={abrirChatVacio}
-                        title="Abrir chat de WhatsApp vacío"
-                        className="bg-white border-2 border-stone-300 text-stone-500 font-black py-3 px-3 rounded-xl text-xs active:scale-95 transition-all duration-150 cursor-pointer hover:border-stone-400 hover:text-stone-700 flex items-center gap-1.5 shrink-0"
-                        aria-label="Abrir chat vacío en WhatsApp"
+                        title="Abrir chat de WhatsApp"
+                        className="bg-white border-2 border-slate-300 text-slate-700 font-black py-3 px-3 rounded-xl text-xs active:scale-95 transition-all cursor-pointer hover:border-slate-400 hover:text-slate-900 flex items-center gap-1.5 shrink-0 shadow-sm"
+                        aria-label="Abrir chat libre en WhatsApp"
                       >
                         <MessageCircle size={14} />
                         <span className="tracking-wider">LIBRE</span>
@@ -1272,7 +1348,7 @@ function App() {
                     )}
                     <button
                       onClick={avisarAdmin}
-                      className="flex-1 bg-stone-200 text-stone-700 font-black py-3 rounded-xl text-xs border border-stone-300 active:scale-95 transition-all duration-150 cursor-pointer tracking-wider hover:bg-stone-300"
+                      className="flex-1 bg-slate-200 text-slate-800 font-black py-3 rounded-xl text-xs border border-slate-300 active:scale-95 transition-all cursor-pointer tracking-wider hover:bg-slate-300 shadow-sm"
                     >
                       INFORMAR ADMIN
                     </button>
@@ -1287,33 +1363,30 @@ function App() {
           </div>
 
           <div className="flex flex-col">
-            <div className="flex items-center gap-2 mb-5">
-              <div className={`w-2 h-2 rounded-full ${modo === 'carga' ? 'bg-emerald-500' : 'bg-red-500'}`} />
-              <h3 className={`text-[11px] font-black uppercase tracking-widest ${modo === 'carga' ? 'text-emerald-600' : 'text-red-600'}`}>
+            <div className="flex items-center gap-2 mb-4">
+              <div className={`w-2.5 h-2.5 rounded-full ${modo === 'carga' ? 'bg-emerald-600' : 'bg-red-600'}`} />
+              <h3 className={`text-[11px] font-black uppercase tracking-widest ${modo === 'carga' ? 'text-emerald-800' : 'text-red-700'}`}>
                 {modo === 'carga' ? 'Verificar en cocina:' : 'Entregar estos ítems:'}
               </h3>
             </div>
 
             <div className="flex flex-col space-y-3 pb-4">
-              {pedidoActual.items.map((it, i) => {
+              {(pedidoActual?.items || []).map((it, i) => {
                 const activo = modo === 'carga' ? it.marcado : it.sacado;
                 return (
-                  // duration-300 + scale micro-feedback: al marcar, la tarjeta
-                  // se "aplasta" levemente (scale-[0.98]) antes de su color nuevo,
-                  // dando sensación táctil continua y premium.
                   <label
                     key={i}
                     className={`
-                      flex items-center p-5 rounded-2xl border-2
-                      transition-all duration-300 ease-out cursor-pointer
+                      flex items-center p-4 sm:p-5 rounded-2xl border-2
+                      transition-all duration-200 ease-out cursor-pointer active:scale-[0.99]
                       ${
                         modo === 'carga'
                           ? activo
-                            ? 'bg-emerald-50 border-emerald-200 scale-[1.00]'
-                            : 'bg-white border-stone-200 shadow-card hover:border-stone-300 scale-[1.00]'
+                            ? 'bg-emerald-50 border-emerald-400 shadow-sm'
+                            : 'bg-white border-slate-200 shadow-card hover:border-slate-300'
                           : activo
-                            ? 'bg-red-50 border-red-200 scale-[1.00]'
-                            : 'bg-white border-stone-200 shadow-card hover:border-stone-300 scale-[1.00]'
+                            ? 'bg-red-50 border-red-400 shadow-sm'
+                            : 'bg-white border-slate-200 shadow-card hover:border-slate-300'
                       }
                     `}
                   >
@@ -1321,13 +1394,13 @@ function App() {
                       type="checkbox"
                       checked={activo}
                       onChange={() => toggleCaja(i)}
-                      className={`w-7 h-7 rounded-lg border-2 mr-4 shrink-0 ${
-                        modo === 'carga' ? 'accent-emerald-500' : 'accent-red-600'
+                      className={`w-6 h-6 rounded-lg border-2 mr-4 shrink-0 ${
+                        modo === 'carga' ? 'accent-emerald-600' : 'accent-red-600'
                       }`}
                     />
                     <span
-                      className={`text-base sm:text-lg font-bold leading-tight transition-all duration-300 ${
-                        activo ? 'line-through opacity-40' : 'text-stone-800'
+                      className={`text-base sm:text-lg font-bold leading-tight transition-all duration-200 ${
+                        activo ? 'line-through opacity-45 text-slate-500' : 'text-slate-900'
                       }`}
                     >
                       {it.nombre}
@@ -1335,8 +1408,8 @@ function App() {
                     {activo && (
                       <CheckCircle2
                         size={18}
-                        className={`ml-auto shrink-0 transition-all duration-300 ${
-                          modo === 'carga' ? 'text-emerald-500' : 'text-red-400'
+                        className={`ml-auto shrink-0 transition-all ${
+                          modo === 'carga' ? 'text-emerald-700' : 'text-red-600'
                         }`}
                       />
                     )}
