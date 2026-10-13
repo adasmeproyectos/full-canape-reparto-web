@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { procesarPedidos } from './lib/gemini';
+import { procesarPedidos, extraerItemDetalle } from './lib/gemini';
 import { supabase } from './lib/supabase';
 import {
   registrarServiceWorker,
@@ -60,7 +60,7 @@ function App() {
 
   // --- Modo Edición ---
   const [modoEdicion, setModoEdicion] = useState(false);
-  const [formEdicion, setFormEdicion] = useState({ cliente: '', telefono: '', direccion: '' });
+  const [formEdicion, setFormEdicion] = useState({ cliente: '', nombre_cliente: '', telefono: '', direccion: '' });
   const [editProgress, setEditProgress] = useState(0);
   const editTimer = useRef(null);
 
@@ -348,7 +348,17 @@ function App() {
       const preparar = (ruta) => ruta.map(p => ({
         ...p,
         id: Math.random().toString(36).substring(2, 9),
-        items: p.items.map(i => ({ nombre: i, marcado: false, sacado: false, entrega_at: null }))
+        items: (p.items || []).map(i => {
+          const detalle = extraerItemDetalle(i);
+          return {
+            nombre: detalle.nombre,
+            cantidad: detalle.cantidad,
+            textoOriginal: detalle.textoOriginal,
+            marcado: false,
+            sacado: false,
+            entrega_at: null
+          };
+        })
       }));
       if (data.pedidos && data.pedidos.length > 0) {
         const nuevosPedidos = preparar(data.pedidos);
@@ -471,6 +481,7 @@ function App() {
           clearInterval(editTimer.current);
           setFormEdicion({ 
             cliente: pedidos[index]?.cliente || '', 
+            nombre_cliente: pedidos[index]?.nombre_cliente || '',
             telefono: pedidos[index]?.telefono || '', 
             direccion: pedidos[index]?.direccion || '' 
           });
@@ -494,6 +505,7 @@ function App() {
     nuevos[index] = { 
       ...nuevos[index], 
       cliente: formEdicion.cliente.trim(),
+      nombre_cliente: formEdicion.nombre_cliente.trim(),
       telefono: sanitizarTelefonoChileno(formEdicion.telefono),
       direccion: formEdicion.direccion.trim()
     };
@@ -605,12 +617,24 @@ function App() {
 
   const todoCargado = pedidos.length > 0 && pedidos.every(p => (p.items || []).every(it => it.marcado));
 
-  // Totales de bultos
-  const totalCajasRuta = pedidos.reduce((acc, p) => acc + (p.items?.length || 0), 0);
-  const cajasCargadas = pedidos.reduce((acc, p) => acc + (p.items ? p.items.filter(it => it.marcado).length : 0), 0);
+  // Totales de bultos (suma de multiplicadores/cantidades de cajas)
+  const totalCajasRuta = pedidos.reduce(
+    (acc, p) => acc + (p.items || []).reduce((sum, it) => sum + (Number(it.cantidad) || 1), 0),
+    0
+  );
+  const cajasCargadas = pedidos.reduce(
+    (acc, p) => acc + (p.items || []).filter(it => it.marcado).reduce((sum, it) => sum + (Number(it.cantidad) || 1), 0),
+    0
+  );
   const pedidoActual = pedidos[index] || pedidos[0];
-  const bultosParadaActual = pedidoActual?.items?.length || 0;
-  const bultosEntregadosParada = (pedidoActual?.items || []).filter(it => it.sacado).length;
+  const bultosParadaActual = (pedidoActual?.items || []).reduce(
+    (sum, it) => sum + (Number(it.cantidad) || 1),
+    0
+  );
+  const bultosEntregadosParada = (pedidoActual?.items || []).filter(it => it.sacado).reduce(
+    (sum, it) => sum + (Number(it.cantidad) || 1),
+    0
+  );
 
   const BotonRayo = () => (
     <button
@@ -908,6 +932,9 @@ function App() {
                                     {esCurrent ? '▶ EN CAMINO' : `Parada ${i + 1}`}
                                   </p>
                                   <p className="text-sm font-bold text-slate-900 truncate">{p.direccion}</p>
+                                  {p.nombre_cliente && (
+                                    <p className="text-xs font-semibold text-slate-600 truncate">{p.nombre_cliente}</p>
+                                  )}
                                 </div>
                                 <div className="shrink-0 text-right">
                                   {entregado
@@ -1278,6 +1305,11 @@ function App() {
                       Parada {i + 1} {i === index && ' · EN CURSO'}
                     </p>
                     <p className="text-slate-900 font-bold leading-tight truncate">{p.direccion}</p>
+                    {p.nombre_cliente && (
+                      <p className="text-xs font-black text-slate-800 mt-0.5 truncate flex items-center gap-1">
+                        <User size={12} className="shrink-0 text-slate-500" /> {p.nombre_cliente}
+                      </p>
+                    )}
                     <p className={`text-[11px] mt-1 font-semibold ${i === index ? 'text-red-600' : 'text-slate-600'}`}>{p.cliente}</p>
                   </div>
                   <div className="flex flex-col gap-2 shrink-0 relative z-30">
@@ -1370,7 +1402,11 @@ function App() {
                 </div>
                 <input 
                   type="text" value={formEdicion.cliente} onChange={e => setFormEdicion({...formEdicion, cliente: e.target.value})}
-                  className="w-full bg-white border-2 border-slate-300 rounded-xl px-4 py-3 font-black text-slate-900 text-base outline-none focus:border-red-600 shadow-sm" placeholder="Horario / Cliente"
+                  className="w-full bg-white border-2 border-slate-300 rounded-xl px-4 py-3 font-black text-slate-900 text-base outline-none focus:border-red-600 shadow-sm" placeholder="Horario / Día"
+                />
+                <input 
+                  type="text" value={formEdicion.nombre_cliente} onChange={e => setFormEdicion({...formEdicion, nombre_cliente: e.target.value})}
+                  className="w-full bg-white border-2 border-slate-300 rounded-xl px-4 py-3 font-black text-slate-900 text-base outline-none focus:border-red-600 shadow-sm" placeholder="Nombre del Cliente (ej: Josefina Bilbao)"
                 />
                 <input 
                   type="tel" value={formEdicion.telefono} onChange={e => setFormEdicion({...formEdicion, telefono: e.target.value})}
@@ -1415,6 +1451,13 @@ function App() {
                   </div>
                   <BotonRayo />
                 </div>
+
+                {pedidoActual?.nombre_cliente ? (
+                  <div className="bg-slate-50 p-4 rounded-2xl border-2 border-slate-200 flex items-center gap-3 shadow-sm">
+                    <div className="bg-slate-200 p-2 rounded-xl shrink-0"><User size={16} className="text-slate-700" /></div>
+                    <p className="font-black text-slate-900 text-base leading-snug truncate">{pedidoActual.nombre_cliente}</p>
+                  </div>
+                ) : null}
 
                 <div className="bg-slate-50 p-4 rounded-2xl border-2 border-slate-200 flex items-start gap-3">
                   <div className="bg-red-100 p-2 rounded-xl shrink-0"><MapPin size={16} className="text-red-600" /></div>
@@ -1472,28 +1515,28 @@ function App() {
                       <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-1.5">
                         <MessageCircle size={12} className="text-[#25D366]" /> Respuestas rápidas WhatsApp
                       </p>
-                      <div className="grid grid-cols-4 gap-2">
+                      <div className="grid grid-cols-4 gap-1.5">
                         <button
                           onClick={enviarMensajeTrafico}
-                          className="bg-white border-2 border-slate-300 hover:border-[#25D366] hover:bg-emerald-50 text-slate-800 font-black py-2.5 px-1 rounded-xl text-xs active:scale-[0.97] transition-all text-center shadow-sm cursor-pointer"
+                          className="bg-white border-2 border-slate-300 hover:border-[#25D366] hover:bg-emerald-50 text-slate-800 font-bold py-2 px-1 rounded-xl text-[11px] sm:text-xs active:scale-[0.97] transition-all text-center shadow-sm cursor-pointer whitespace-nowrap flex items-center justify-center min-w-0"
                         >
                           Tráfico
                         </button>
                         <button
                           onClick={enviarMensajeAfuera}
-                          className="bg-white border-2 border-slate-300 hover:border-[#25D366] hover:bg-emerald-50 text-slate-800 font-black py-2.5 px-1 rounded-xl text-xs active:scale-[0.97] transition-all text-center shadow-sm cursor-pointer"
+                          className="bg-white border-2 border-slate-300 hover:border-[#25D366] hover:bg-emerald-50 text-slate-800 font-bold py-2 px-1 rounded-xl text-[11px] sm:text-xs active:scale-[0.97] transition-all text-center shadow-sm cursor-pointer whitespace-nowrap flex items-center justify-center min-w-0"
                         >
                           Afuera
                         </button>
                         <button
                           onClick={enviarMensajeRecepcion}
-                          className="bg-white border-2 border-slate-300 hover:border-[#25D366] hover:bg-emerald-50 text-slate-800 font-black py-2.5 px-1 rounded-xl text-xs active:scale-[0.97] transition-all text-center shadow-sm cursor-pointer"
+                          className="bg-white border-2 border-slate-300 hover:border-[#25D366] hover:bg-emerald-50 text-slate-800 font-bold py-2 px-1 rounded-xl text-[11px] sm:text-xs active:scale-[0.97] transition-all text-center shadow-sm cursor-pointer whitespace-nowrap flex items-center justify-center min-w-0"
                         >
                           Recepción
                         </button>
                         <button
                           onClick={abrirChatVacio}
-                          className="bg-white border-2 border-slate-300 hover:border-slate-400 hover:bg-slate-100 text-slate-800 font-black py-2.5 px-1 rounded-xl text-xs active:scale-[0.97] transition-all text-center shadow-sm cursor-pointer"
+                          className="bg-white border-2 border-slate-300 hover:border-slate-400 hover:bg-slate-100 text-slate-800 font-bold py-2 px-1 rounded-xl text-[11px] sm:text-xs active:scale-[0.97] transition-all text-center shadow-sm cursor-pointer whitespace-nowrap flex items-center justify-center min-w-0"
                         >
                           Chat
                         </button>
