@@ -14,8 +14,10 @@ import {
   ChevronLeft, ChevronRight, Package, MapPin, Loader2, CheckCircle2, 
   Map, Zap, Truck, Home, Phone, MessageCircle, RefreshCcw, ListOrdered, 
   X, ArrowUp, ArrowDown, AlertTriangle, Pencil, Save, Clock, ChevronDown,
-  Trash2, Bell, BellOff
+  Trash2, Bell, BellOff, User, PhoneCall
 } from 'lucide-react';
+
+const REPARTIDORES = ['Javi', 'Mora', 'Sala', 'Nico'];
 
 const getMemoria = (clave, valorPorDefecto) => {
   try {
@@ -35,6 +37,10 @@ const guardarMemoria = (clave, valor) => {
 };
 
 function App() {
+  // --- Identidad del Repartidor ---
+  const [repartidorNombre, setRepartidorNombre] = useState(() => getMemoria('fc_repartidor_nombre', ''));
+  const [modalSelectorRepartidor, setModalSelectorRepartidor] = useState(() => !getMemoria('fc_repartidor_nombre', ''));
+
   const [input, setInput]               = useState(() => getMemoria('fc_input', ""));
   const [pedidos, setPedidos]           = useState(() => getMemoria('fc_pedidos', []));
   const [historial, setHistorial]       = useState(() => getMemoria('fc_historial', null));
@@ -93,6 +99,14 @@ function App() {
   // --- Web Push ---
   const [pushEstado, setPushEstado] = useState('idle');
   const pushInicializado = useRef(false);
+
+  // Selección y persistencia del repartidor
+  const seleccionarRepartidor = (nombre) => {
+    dispararHaptico(25);
+    setRepartidorNombre(nombre);
+    guardarMemoria('fc_repartidor_nombre', nombre);
+    setModalSelectorRepartidor(false);
+  };
 
   // Limpieza preventiva de temporizadores al desmontar componente
   useEffect(() => {
@@ -173,7 +187,7 @@ function App() {
     };
   }, [index, modo]);
 
-  // Sincronización desacoplada con Supabase
+  // Sincronización enriquecida con Supabase (incluye nombre de repartidor y dirección actual)
   const sincronizarConNube = useCallback(async () => {
     if (pedidos.length === 0 || !supabase) return;
 
@@ -181,25 +195,38 @@ function App() {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), 6000);
 
-      const { error } = await supabase.from('monitoreo_rutas').upsert({
+      const nombreFinal = repartidorNombre || ("Repartidor " + sessionId.substring(0, 5).toUpperCase());
+      const direccionActual = pedidos[index]?.direccion || '';
+
+      const datosUpsert = {
         id: sessionId,
-        nombre_repartidor: "Repartidor " + sessionId.substring(0, 5).toUpperCase(),
+        nombre_repartidor: nombreFinal,
         progreso_actual: index,
         total_pedidos: pedidos.length,
         pedidos_json: pedidos,
         ultima_actualizacion: new Date().toISOString(),
         esta_activo: modo !== 'fin'
+      };
+
+      // Se intenta enviar direccion_actual si la columna está disponible; si no, degrada sin fallar
+      let res = await supabase.from('monitoreo_rutas').upsert({
+        ...datosUpsert,
+        direccion_actual: direccionActual
       }).abortSignal(controller.signal);
+
+      if (res.error && res.error.message?.includes('direccion_actual')) {
+        res = await supabase.from('monitoreo_rutas').upsert(datosUpsert).abortSignal(controller.signal);
+      }
 
       clearTimeout(timeoutId);
 
-      if (error) {
-        console.warn("Sincronización en la nube rechazada:", error.message);
+      if (res.error) {
+        console.warn("Sincronización en la nube rechazada:", res.error.message);
       }
     } catch {
       // Degradar silenciosamente sin bloquear la UI en desconexión móvil
     }
-  }, [pedidos, index, modo, sessionId]);
+  }, [pedidos, index, modo, sessionId, repartidorNombre]);
 
   // Ejecución de sincronización con debounce
   useEffect(() => {
@@ -474,6 +501,7 @@ function App() {
     setModoEdicion(false);
   };
 
+  // --- Avisos de WhatsApp (Mensajes Operativos y Rápidos) ---
   const enviarAvisoCliente = () => {
     if (!pedidoActual?.telefono) return;
     const min = eta || 'unos';
@@ -481,15 +509,33 @@ function App() {
     abrirWhatsApp({ telefono: pedidoActual.telefono, mensaje: texto });
   };
 
-  const enviarAvisoLlegada = () => {
+  const enviarMensajeTrafico = () => {
     if (!pedidoActual?.telefono) return;
-    const texto = `¡Hola! Ya estoy llegando a su domicilio. Por favor, esté atento/a para recibir su pedido. ¡Muchas gracias!`;
+    const texto = "¡Hola! 👋 Te escribe el repartidor de Full Canapé. Hay un poco de tráfico en la ruta, por lo que me demoraré unos 10 minutitos más. ¡Muchas gracias por la paciencia! 🚗💨";
+    abrirWhatsApp({ telefono: pedidoActual.telefono, mensaje: texto });
+  };
+
+  const enviarMensajeAfuera = () => {
+    if (!pedidoActual?.telefono) return;
+    const texto = "¡Hola! 👋 Te aviso que ya estoy afuera de tu domicilio con tu pedido de Full Canapé. ¡Quedo atento/a para hacer la entrega! 📦✨";
+    abrirWhatsApp({ telefono: pedidoActual.telefono, mensaje: texto });
+  };
+
+  const enviarMensajeRecepcion = () => {
+    if (!pedidoActual?.telefono) return;
+    const texto = "¡Hola! 👋 Ya llegué y estoy en recepción con tu pedido de Full Canapé. ¿Me podrías confirmar tu número de departamento/casa por favor? ¡Muchas gracias! 🏢🙌";
     abrirWhatsApp({ telefono: pedidoActual.telefono, mensaje: texto });
   };
 
   const abrirChatVacio = () => {
     if (!pedidoActual?.telefono) return;
     abrirWhatsApp({ telefono: pedidoActual.telefono });
+  };
+
+  const llamarCliente = () => {
+    if (!pedidoActual?.telefono) return;
+    dispararHaptico(20);
+    window.location.href = `tel:+${pedidoActual.telefono}`;
   };
 
   const avisarAdmin = () => {
@@ -505,8 +551,8 @@ function App() {
     dispararHaptico(40);
     const ultimaDireccion = pedidos[pedidos.length - 1]?.direccion || '';
     dispararNotificacionPush(
-      'Ruta completada — Full Canapé',
-      `Última entrega en ${ultimaDireccion}. Ruta terminada con éxito.`
+      `Ruta completada — ${repartidorNombre || 'Repartidor'}`,
+      `Última parada: ${ultimaDireccion}`
     );
     setAbsorbiendo(true);
     setTimeout(() => { setModo('fin'); setAbsorbiendo(false); }, 750);
@@ -529,8 +575,8 @@ function App() {
     setIndex(0); setEta(''); setModo('reparto');
     if (pedidos.length > 0) {
       dispararNotificacionPush(
-        'Ruta iniciada — Full Canapé',
-        `Repartidor en camino a la parada 1: ${pedidos[0]?.direccion || ''}`
+        `Ruta iniciada — ${repartidorNombre || 'Repartidor'}`,
+        `Próxima parada: ${pedidos[0]?.direccion || ''}`
       );
     }
   };
@@ -539,13 +585,14 @@ function App() {
     dispararHaptico(20);
     setIndex(i => {
       const siguiente = Math.min(pedidos.length - 1, i + 1);
+      // Notificación push estricta: ÚNICAMENTE en modo reparto (nunca en check-in de cocina)
       if (siguiente > i && modo === 'reparto') {
-        const dirAnterior = pedidos[i]?.direccion || 'dirección anterior';
         const dirSiguiente = pedidos[siguiente]?.direccion || '';
-        const mensaje = dirSiguiente
-          ? `Entregado en ${dirAnterior}. En camino a: ${dirSiguiente}`
-          : `Entregado en ${dirAnterior}. Última parada completada.`;
-        dispararNotificacionPush('Entrega registrada — Full Canapé', mensaje);
+        const titulo = `Parada ${i + 1}/${pedidos.length} entregada — ${repartidorNombre || 'Repartidor'}`;
+        const cuerpo = dirSiguiente
+          ? `Próxima parada: ${dirSiguiente}`
+          : 'Ruta completada sin paradas pendientes';
+        dispararNotificacionPush(titulo, cuerpo);
       }
       return siguiente;
     });
@@ -557,6 +604,13 @@ function App() {
   };
 
   const todoCargado = pedidos.length > 0 && pedidos.every(p => (p.items || []).every(it => it.marcado));
+
+  // Totales de bultos
+  const totalCajasRuta = pedidos.reduce((acc, p) => acc + (p.items?.length || 0), 0);
+  const cajasCargadas = pedidos.reduce((acc, p) => acc + (p.items ? p.items.filter(it => it.marcado).length : 0), 0);
+  const pedidoActual = pedidos[index] || pedidos[0];
+  const bultosParadaActual = pedidoActual?.items?.length || 0;
+  const bultosEntregadosParada = (pedidoActual?.items || []).filter(it => it.sacado).length;
 
   const BotonRayo = () => (
     <button
@@ -608,7 +662,7 @@ function App() {
             w-full h-[68px] rounded-3xl font-black text-sm sm:text-base text-white
             transition-all duration-200 flex items-center justify-center gap-3 cursor-pointer
             ${todoCargado
-              ? 'bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] shadow-emerald'
+              ? 'bg-emerald-600 hover:bg-emerald-700 active:scale-[0.97] shadow-emerald'
               : 'bg-slate-200 text-slate-500 border border-slate-300 cursor-not-allowed'}
           `}
         >
@@ -623,7 +677,7 @@ function App() {
           aria-label={index === pedidos.length - 1 ? 'Terminar ruta' : 'Siguiente entrega'}
           className={`
             w-full h-[68px] text-white rounded-3xl font-black text-sm sm:text-base
-            active:scale-[0.98] transition-all duration-200 disabled:opacity-40
+            active:scale-[0.97] transition-all duration-200 disabled:opacity-40
             flex items-center justify-center gap-3 cursor-pointer
             ${index === pedidos.length - 1 
               ? 'bg-emerald-600 hover:bg-emerald-700 shadow-emerald' 
@@ -634,6 +688,54 @@ function App() {
           {index === pedidos.length - 1 ? 'TERMINAR RUTA' : 'ENTREGADO — SIGUIENTE'}
         </button>
       )}
+    </div>
+  );
+
+  // --- Modal Onboarding Selector de Repartidor ---
+  const ModalSelectorRepartidorComponent = () => (
+    <div className="fixed inset-0 bg-slate-900/40 backdrop-blur-sm z-[350] flex items-center justify-center p-4 sm:p-6 animate-pop-in">
+      <div className="bg-white border-2 border-slate-300 rounded-[2rem] p-6 max-w-sm w-full shadow-2xl flex flex-col">
+        <div className="flex justify-between items-start mb-4">
+          <div>
+            <p className="text-red-600 text-xs font-black uppercase tracking-widest mb-1">Identificación</p>
+            <h3 className="text-2xl font-black text-slate-900 tracking-tight">¿Quién conduce hoy?</h3>
+          </div>
+          {repartidorNombre && (
+            <button
+              onClick={() => setModalSelectorRepartidor(false)}
+              className="p-2 text-slate-400 hover:text-slate-700 rounded-xl cursor-pointer"
+              aria-label="Cerrar modal"
+            >
+              <X size={20} />
+            </button>
+          )}
+        </div>
+        <p className="text-slate-600 text-xs font-semibold mb-5 leading-relaxed">
+          Selecciona tu nombre para registrar tus entregas y mantener informada a la central de Full Canapé:
+        </p>
+
+        <div className="grid grid-cols-2 gap-3 mb-2">
+          {REPARTIDORES.map((nom) => {
+            const activo = repartidorNombre === nom;
+            return (
+              <button
+                key={nom}
+                onClick={() => seleccionarRepartidor(nom)}
+                className={`
+                  h-20 rounded-2xl font-black text-lg flex flex-col items-center justify-center gap-1
+                  transition-all duration-200 cursor-pointer active:scale-95
+                  ${activo
+                    ? 'bg-red-600 text-white shadow-cta border-2 border-red-700'
+                    : 'bg-slate-50 border-2 border-slate-300 text-slate-800 hover:bg-slate-100 shadow-sm'}
+                `}
+              >
+                <span>{nom}</span>
+                {activo && <span className="text-[10px] font-bold uppercase tracking-wider opacity-90">Activo</span>}
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 
@@ -709,6 +811,8 @@ function App() {
                 const horasPasadas = (new Date() - new Date(ruta.ultima_actualizacion)) / (1000 * 60 * 60);
                 const isStale = horasPasadas > 12;
                 const isExpanded = expandedAdminId === ruta.id;
+                const paradaActualObj = ruta.pedidos_json?.[ruta.progreso_actual];
+                const dirDestinoActual = paradaActualObj?.direccion || (ruta.progreso_actual >= ruta.total_pedidos ? 'Ruta completada' : 'En tránsito');
 
                 return (
                   <div
@@ -723,11 +827,17 @@ function App() {
                     >
                       <div className="flex-1 min-w-0 pr-3">
                         <h3 className="font-black text-base flex items-center gap-2 truncate text-slate-900">
-                          {!isStale && <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse-dot shrink-0" />}
+                          {!isStale && <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse-dot shrink-0" />}
                           {ruta.nombre_repartidor}
                           {isStale && <Clock size={14} className="text-amber-600 shrink-0" />}
                         </h3>
-                        <p className="text-[10px] font-mono text-slate-500 mt-0.5 truncate">
+                        
+                        {/* Monitor de parada y dirección actual */}
+                        <p className="text-xs font-bold text-red-600 mt-1 truncate">
+                          Parada {Math.min(ruta.progreso_actual + 1, ruta.total_pedidos)}/{ruta.total_pedidos} en camino a: {dirDestinoActual}
+                        </p>
+
+                        <p className="text-[10px] font-mono text-slate-400 mt-0.5 truncate">
                           ID: {String(ruta.id).substring(0, 12)}
                         </p>
 
@@ -914,24 +1024,30 @@ function App() {
           paddingRight: 'max(1.5rem, env(safe-area-inset-right))'
         }}
       >
-        <button
-          onPointerDown={startAdmin}
-          onPointerUp={stopAdmin}
-          onPointerLeave={stopAdmin}
-          className="absolute top-0 right-0 w-28 h-28 flex items-start justify-end cursor-pointer"
-          style={{
-            paddingTop: 'max(1.25rem, env(safe-area-inset-top))',
-            paddingRight: 'max(1.25rem, env(safe-area-inset-right))',
-            WebkitUserSelect: 'none',
-            touchAction: 'none'
-          }}
-          aria-label="Acceso panel admin"
-        >
-          <div className="relative">
-            <Zap size={22} className="text-slate-300 hover:text-slate-500 transition-colors" />
-            <div className="absolute top-7 right-0 h-1 bg-red-600 transition-all duration-75 rounded-full" style={{ width: `${adminProgress}%` }} />
-          </div>
-        </button>
+        {modalSelectorRepartidor && <ModalSelectorRepartidorComponent />}
+
+        {/* Botón de cambio de identidad y Radar Admin */}
+        <div className="absolute top-4 right-4 flex items-center gap-2">
+          <button
+            onClick={() => setModalSelectorRepartidor(true)}
+            title="Cambiar repartidor"
+            className="bg-white text-slate-800 border-2 border-slate-300 px-3.5 py-2.5 rounded-2xl font-black text-xs flex items-center gap-1.5 active:scale-95 shadow-sm hover:bg-slate-50 cursor-pointer"
+          >
+            <User size={14} className="text-red-600 shrink-0" />
+            <span>{repartidorNombre || 'Repartidor'}</span>
+          </button>
+
+          <button
+            onPointerDown={startAdmin}
+            onPointerUp={stopAdmin}
+            onPointerLeave={stopAdmin}
+            className="p-2.5 rounded-2xl bg-white border-2 border-slate-300 cursor-pointer text-slate-400 hover:text-slate-600 relative overflow-hidden"
+            aria-label="Acceso panel admin"
+          >
+            <Zap size={18} />
+            <div className="absolute bottom-0 left-0 h-1 bg-red-600 transition-all duration-75" style={{ width: `${adminProgress}%` }} />
+          </button>
+        </div>
 
         <div className="mb-8 text-center flex flex-col items-center animate-slide-up mt-6">
           <img src="/logo.png" alt="Logo Full Canapé" className="w-28 h-auto mb-4 drop-shadow-sm" />
@@ -1004,8 +1120,6 @@ function App() {
     );
   }
 
-  const pedidoActual = pedidos[index] || pedidos[0];
-
   return (
     <div
       className="min-h-screen bg-slate-100 flex flex-col relative max-w-7xl mx-auto text-slate-900"
@@ -1026,6 +1140,8 @@ function App() {
           animation: jiggle 0.25s infinite ease-in-out;
         }
       `}</style>
+
+      {modalSelectorRepartidor && <ModalSelectorRepartidorComponent />}
 
       <div className={`fixed inset-0 bg-white z-[100] transition-all duration-700 pointer-events-none ${absorbiendo ? 'opacity-100 scale-150 rounded-none' : 'opacity-0 scale-0 rounded-full'}`} style={{ transformOrigin: 'bottom center' }} />
 
@@ -1090,13 +1206,13 @@ function App() {
       )}
 
       {/* Barra superior de controles */}
-      <div className="flex justify-between items-center mb-4 px-1">
+      <div className="flex justify-between items-center mb-4 px-1 gap-2">
         <button
           onPointerDown={startReset}
           onPointerUp={stopReset}
           onPointerLeave={stopReset}
           aria-label="Mantén presionado para reiniciar"
-          className="relative overflow-hidden bg-white text-slate-700 px-5 py-3 rounded-2xl font-bold text-xs flex items-center gap-2 active:scale-95 transition-all select-none touch-none cursor-pointer shadow-sm border-2 border-slate-200"
+          className="relative overflow-hidden bg-white text-slate-700 px-4 py-3 rounded-2xl font-bold text-xs flex items-center gap-2 active:scale-95 transition-all select-none touch-none cursor-pointer shadow-sm border-2 border-slate-200 shrink-0"
           style={{ WebkitUserSelect: 'none' }}
         >
           <div className="absolute bottom-0 left-0 h-[3px] bg-red-600 transition-all duration-75 rounded-full" style={{ width: `${resetProgress}%` }} />
@@ -1104,13 +1220,26 @@ function App() {
           <span className="tracking-wider">{resetProgress > 0 ? 'MANTÉN...' : 'REINICIAR'}</span>
         </button>
 
-        <button
-          onClick={() => { dispararHaptico(15); setShowReorder(true); }}
-          className="bg-white text-slate-900 border-2 border-slate-200 px-5 py-3 rounded-2xl font-black text-xs flex items-center gap-2 active:scale-95 transition-all shadow-sm cursor-pointer hover:bg-slate-50"
-        >
-          <ListOrdered size={14} />
-          <span className="tracking-wider">COLA DE REPARTO</span>
-        </button>
+        <div className="flex items-center gap-2">
+          {/* Badge del repartidor con opción de reasignar */}
+          <button
+            onClick={() => setModalSelectorRepartidor(true)}
+            title="Cambiar repartidor activo"
+            className="bg-white text-slate-800 border-2 border-slate-300 px-3 py-3 rounded-2xl font-black text-xs flex items-center gap-1.5 active:scale-95 shadow-sm hover:bg-slate-50 cursor-pointer"
+          >
+            <User size={14} className="text-red-600 shrink-0" />
+            <span className="truncate max-w-[70px] sm:max-w-none">{repartidorNombre || 'Repartidor'}</span>
+          </button>
+
+          <button
+            onClick={() => { dispararHaptico(15); setShowReorder(true); }}
+            className="bg-white text-slate-900 border-2 border-slate-200 px-4 py-3 rounded-2xl font-black text-xs flex items-center gap-1.5 active:scale-95 transition-all shadow-sm cursor-pointer hover:bg-slate-50"
+          >
+            <ListOrdered size={14} />
+            <span className="tracking-wider hidden sm:inline">COLA DE REPARTO</span>
+            <span className="tracking-wider sm:hidden">COLA</span>
+          </button>
+        </div>
       </div>
 
       {/* Modal Cola de Reparto */}
@@ -1203,7 +1332,21 @@ function App() {
 
       {/* Contenedor Principal de la Tarjeta */}
       <div className="flex-1 bg-white rounded-[2.5rem] p-6 sm:p-8 shadow-card card-accent-top flex flex-col relative animate-slide-up border-2 border-slate-200/90">
-        <div className="flex items-center justify-between mb-6 bg-slate-50 p-2 rounded-2xl border border-slate-200">
+        
+        {/* Badge Global de Cajas Durante Check-In */}
+        {modo === 'carga' && (
+          <div className="bg-emerald-100 border-2 border-emerald-400 text-emerald-950 font-black text-xs sm:text-sm px-4 py-2.5 rounded-2xl mb-4 flex items-center justify-between shadow-sm animate-fade-in">
+            <div className="flex items-center gap-2">
+              <Package size={18} className="text-emerald-700 shrink-0" />
+              <span>Total cajas a cargar: <strong>{totalCajasRuta} cajas</strong></span>
+            </div>
+            <span className="text-[11px] font-bold bg-white/90 px-2 py-0.5 rounded-lg border border-emerald-300 shrink-0">
+              {cajasCargadas}/{totalCajasRuta} marcadas
+            </span>
+          </div>
+        )}
+
+        <div className="flex items-center justify-between mb-5 bg-slate-50 p-2 rounded-2xl border border-slate-200">
           <button onClick={retroceder} disabled={index === 0} aria-label="Parada anterior" className="w-14 h-14 flex items-center justify-center bg-white text-slate-800 rounded-xl shadow-sm disabled:opacity-25 active:scale-95 transition-all cursor-pointer border-2 border-slate-200"><ChevronLeft size={26} strokeWidth={2.5} /></button>
           <div className="text-center">
             <p className="text-red-600 text-xs font-black uppercase tracking-widest">Parada</p>
@@ -1217,7 +1360,7 @@ function App() {
             slideVisible ? 'opacity-100 translate-x-0' : 'opacity-0 translate-x-2'
           }`}
         >
-          <div className="flex flex-col gap-5">
+          <div className="flex flex-col gap-4">
             {modoEdicion ? (
               <div className="animate-jiggle bg-slate-50 p-5 rounded-[2rem] border-2 border-slate-300 shadow-sm flex flex-col gap-4 relative z-10">
                 <div className="flex items-center justify-between mb-1">
@@ -1290,12 +1433,9 @@ function App() {
                   NAVEGAR CON MAPS
                 </button>
 
-                <div className="bg-slate-50 p-5 rounded-3xl border-2 border-slate-200">
-                  <h3 className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-4 flex items-center gap-2">
-                    <MessageCircle size={13} /> Avisos automáticos
-                  </h3>
-
-                  <div className="flex gap-3 mb-3">
+                <div className="bg-slate-50 p-4 sm:p-5 rounded-3xl border-2 border-slate-300 shadow-sm">
+                  {/* Fila 1: ETA y Salida */}
+                  <div className="flex gap-2.5 mb-3.5">
                     <div className="relative shrink-0">
                       <input 
                         type="number" 
@@ -1312,43 +1452,68 @@ function App() {
                       <button
                         onClick={enviarAvisoCliente}
                         disabled={!eta}
-                        className="flex-1 bg-[#25D366] text-white font-black h-[52px] rounded-2xl active:scale-[0.98] transition-all flex items-center justify-center text-xs gap-2 shadow-wa disabled:opacity-40 disabled:saturate-0 cursor-pointer tracking-wider hover:brightness-105"
+                        className="flex-1 bg-[#25D366] hover:bg-[#20ba5a] text-white font-black h-[52px] rounded-2xl active:scale-[0.97] transition-all flex items-center justify-center text-xs gap-2 shadow-wa disabled:opacity-40 disabled:saturate-0 cursor-pointer tracking-wider hover:brightness-105"
                       >
-                        <MessageCircle size={15} /> AVISAR SALIDA
+                        <MessageCircle size={16} /> AVISAR SALIDA
                       </button>
                     ) : (
                       <button
                         onClick={pedirTelefonoAdmin}
-                        className="flex-1 bg-amber-100 hover:bg-amber-200 text-amber-900 border-2 border-amber-300 font-black h-[52px] rounded-2xl active:scale-[0.98] transition-all flex items-center justify-center text-xs gap-2 shadow-sm cursor-pointer tracking-wider"
+                        className="flex-1 bg-amber-100 hover:bg-amber-200 text-amber-950 border-2 border-amber-300 font-black h-[52px] rounded-2xl active:scale-[0.97] transition-all flex items-center justify-center text-xs gap-2 shadow-sm cursor-pointer tracking-wider"
                       >
-                        <MessageCircle size={15} /> PEDIR TELÉFONO
+                        <MessageCircle size={16} /> PEDIR TELÉFONO
                       </button>
                     )}
                   </div>
 
+                  {/* Fila 2: Respuestas Rápidas WhatsApp */}
+                  {pedidoActual?.telefono && (
+                    <div className="mb-3.5">
+                      <p className="text-[10px] font-black text-slate-500 uppercase tracking-widest mb-2 flex items-center gap-1.5">
+                        <MessageCircle size={12} className="text-[#25D366]" /> Respuestas rápidas WhatsApp
+                      </p>
+                      <div className="grid grid-cols-4 gap-2">
+                        <button
+                          onClick={enviarMensajeTrafico}
+                          className="bg-white border-2 border-slate-300 hover:border-[#25D366] hover:bg-emerald-50 text-slate-800 font-black py-2.5 px-1 rounded-xl text-xs active:scale-[0.97] transition-all text-center shadow-sm cursor-pointer"
+                        >
+                          Tráfico
+                        </button>
+                        <button
+                          onClick={enviarMensajeAfuera}
+                          className="bg-white border-2 border-slate-300 hover:border-[#25D366] hover:bg-emerald-50 text-slate-800 font-black py-2.5 px-1 rounded-xl text-xs active:scale-[0.97] transition-all text-center shadow-sm cursor-pointer"
+                        >
+                          Afuera
+                        </button>
+                        <button
+                          onClick={enviarMensajeRecepcion}
+                          className="bg-white border-2 border-slate-300 hover:border-[#25D366] hover:bg-emerald-50 text-slate-800 font-black py-2.5 px-1 rounded-xl text-xs active:scale-[0.97] transition-all text-center shadow-sm cursor-pointer"
+                        >
+                          Recepción
+                        </button>
+                        <button
+                          onClick={abrirChatVacio}
+                          className="bg-white border-2 border-slate-300 hover:border-slate-400 hover:bg-slate-100 text-slate-800 font-black py-2.5 px-1 rounded-xl text-xs active:scale-[0.97] transition-all text-center shadow-sm cursor-pointer"
+                        >
+                          Chat
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Fila 3: Llamada Directa y Aviso Admin */}
                   <div className="flex gap-2">
                     {pedidoActual?.telefono && (
                       <button
-                        onClick={enviarAvisoLlegada}
-                        className="flex-1 bg-white border-2 border-[#25D366] text-[#25D366] font-black py-3 rounded-xl text-xs active:scale-95 transition-all cursor-pointer tracking-wider hover:bg-[#25D366]/5 shadow-sm"
+                        onClick={llamarCliente}
+                        className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl text-xs active:scale-[0.97] transition-all cursor-pointer tracking-wider flex items-center justify-center gap-1.5 shadow-sm"
                       >
-                        ESTOY AFUERA
-                      </button>
-                    )}
-                    {pedidoActual?.telefono && (
-                      <button
-                        onClick={abrirChatVacio}
-                        title="Abrir chat de WhatsApp"
-                        className="bg-white border-2 border-slate-300 text-slate-700 font-black py-3 px-3 rounded-xl text-xs active:scale-95 transition-all cursor-pointer hover:border-slate-400 hover:text-slate-900 flex items-center gap-1.5 shrink-0 shadow-sm"
-                        aria-label="Abrir chat libre en WhatsApp"
-                      >
-                        <MessageCircle size={14} />
-                        <span className="tracking-wider">LIBRE</span>
+                        <PhoneCall size={14} /> LLAMAR DIRECTO
                       </button>
                     )}
                     <button
                       onClick={avisarAdmin}
-                      className="flex-1 bg-slate-200 text-slate-800 font-black py-3 rounded-xl text-xs border border-slate-300 active:scale-95 transition-all cursor-pointer tracking-wider hover:bg-slate-300 shadow-sm"
+                      className="flex-1 bg-slate-200 hover:bg-slate-300 text-slate-800 font-black py-3 rounded-xl text-xs border border-slate-300 active:scale-[0.97] transition-all cursor-pointer tracking-wider shadow-sm text-center"
                     >
                       INFORMAR ADMIN
                     </button>
@@ -1363,14 +1528,27 @@ function App() {
           </div>
 
           <div className="flex flex-col">
-            <div className="flex items-center gap-2 mb-4">
+            {/* Badge de Bultos Por Parada (En Ruta) */}
+            {modo === 'reparto' && (
+              <div className="bg-amber-100 border-2 border-amber-400 text-amber-950 font-black text-xs sm:text-sm px-4 py-2.5 rounded-2xl mb-3 flex items-center justify-between shadow-sm animate-fade-in">
+                <div className="flex items-center gap-2">
+                  <Package size={18} className="text-amber-800 shrink-0" />
+                  <span>Bultos parada: <strong>{bultosParadaActual} cajas</strong></span>
+                </div>
+                <span className="text-[11px] font-bold bg-white/90 px-2 py-0.5 rounded-lg border border-amber-300 shrink-0">
+                  {bultosEntregadosParada}/{bultosParadaActual} entregadas
+                </span>
+              </div>
+            )}
+
+            <div className="flex items-center gap-2 mb-3">
               <div className={`w-2.5 h-2.5 rounded-full ${modo === 'carga' ? 'bg-emerald-600' : 'bg-red-600'}`} />
               <h3 className={`text-[11px] font-black uppercase tracking-widest ${modo === 'carga' ? 'text-emerald-800' : 'text-red-700'}`}>
                 {modo === 'carga' ? 'Verificar en cocina:' : 'Entregar estos ítems:'}
               </h3>
             </div>
 
-            <div className="flex flex-col space-y-3 pb-4">
+            <div className="flex flex-col space-y-2.5 pb-4">
               {(pedidoActual?.items || []).map((it, i) => {
                 const activo = modo === 'carga' ? it.marcado : it.sacado;
                 return (
@@ -1378,7 +1556,7 @@ function App() {
                     key={i}
                     className={`
                       flex items-center p-4 sm:p-5 rounded-2xl border-2
-                      transition-all duration-200 ease-out cursor-pointer active:scale-[0.99]
+                      transition-all duration-200 ease-out cursor-pointer active:scale-[0.98]
                       ${
                         modo === 'carga'
                           ? activo

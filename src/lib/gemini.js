@@ -159,9 +159,9 @@ export async function procesarPedidos(textoWhatsApp) {
   }
 
   try {
-    // Modelo preferido: gemini-2.5-flash (baja latencia y soporte nativo de structured output)
+    // Modelo preferido: gemini-3.5-flash (baja latencia y soporte nativo de structured output)
     const model = genAI.getGenerativeModel({
-      model: 'gemini-2.5-flash',
+      model: 'gemini-3.5-flash',
       generationConfig: {
         responseMimeType: 'application/json',
         responseSchema: schemaPedidos,
