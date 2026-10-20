@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI, SchemaType } from '@google/generative-ai';
 import { sanitizarTelefonoChileno } from './sanitizer.js';
+import catalogoProductos from '../productos.json' with { type: 'json' };
 
 const apiKey = import.meta.env?.VITE_GEMINI_API_KEY;
 const genAI = apiKey ? new GoogleGenerativeAI(apiKey) : null;
@@ -20,7 +21,7 @@ const schemaPedidos = {
           },
           nombre_cliente: {
             type: SchemaType.STRING,
-            description: 'Nombre de la persona o cliente que recibe el pedido (ej: "Josefina Bilbao"). Cadena vacía si no existe.'
+            description: 'Nombre de la persona o cliente que recibe el pedido (ej: "Josefina Bilbao"). NUNCA incluir productos aquí ni duplicar el nombre en items.'
           },
           telefono: {
             type: SchemaType.STRING,
@@ -32,21 +33,21 @@ const schemaPedidos = {
           },
           items: {
             type: SchemaType.ARRAY,
-            description: 'Lista de productos o bultos a entregar en esta parada con su cantidad',
+            description: 'Lista completa de productos o bultos a entregar en esta parada. No omitir ningún producto ni incluir el nombre del cliente.',
             items: {
               type: SchemaType.OBJECT,
               properties: {
                 nombre: {
                   type: SchemaType.STRING,
-                  description: 'Nombre del producto manteniendo el prefijo de cantidad si existe (ej: "3-croissant", "2-canapé mix 3")'
+                  description: 'Descripción íntegra del producto incluyendo prefijo numérico, notas especiales ("sin salmón", "solo crostinis de champiñón"), unidades totales ("120 crostinis champiñón") y sub-sabores agrupados con salto de línea.'
                 },
                 cantidad: {
                   type: SchemaType.INTEGER,
-                  description: 'Cantidad numérica de cajas o unidades para este producto (ej: 3 para "3-croissant", 1 por defecto)'
+                  description: 'Cantidad numérica de CAJAS o BULTOS físicos (ej: 3 para "3-croissant", 1 para "1 caja postres (30 unid)", 1 cuando se expresa en unidades sueltas como "120 crostinis").'
                 },
                 textoOriginal: {
                   type: SchemaType.STRING,
-                  description: 'Línea de texto original tal como venía en el mensaje'
+                  description: 'Texto original íntegro del producto (incluyendo sub-líneas de sabores si las tiene)'
                 }
               },
               required: ['nombre', 'cantidad']
@@ -60,8 +61,84 @@ const schemaPedidos = {
   required: ['pedidos']
 };
 
+// Patrón léxico amplio del dominio gastronómico de Full Canapé
+const PATRON_GASTRONOMICO = /(canap[eé]s?|croissants?|brochetas?|bolitas?|canastos?|canastitos?|quich[eé]s?|empanadas?|empanaditas?|postres?|tablas?|bollos?|dulces?|crostinis?|bocados?|bocaditos?|churrascos?|churrasquitos?|fricas?|picoteos?|mini\s+bocados?|mil\s*hojas|camar[oó]n(?:es)?|empanizados?|tapados?|tapaditos?|s[aá]ndwich(?:es)?|pan\s+de\s+molde|cajitas?|cajas?|pizzetas?|tartaletas?|tartas?|tortas?|pie\s+de\s+lim[oó]n|maracuy[aá]|manjar|tres\s+leches|tiramis[uú]|mousse|brownies?|alfajor(?:es)?|cuchufl[ií]s?|profiterol(?:es)?|macarons?|cheesecake|suspiro|merengue|frambuesa|chocolate|l[uú]cuma|salm[oó]n|champi[ñn][oó]n(?:es)?|pollo|\bave\b|carne|queso|jam[oó]n|palmito|palta|esp[aá]rragos?|choclo|choclillo|piment[oó]n|pimiento|caprese|ceviche|sopaipillas?|pebre|salsa|veggie|surtidos?|variados?|sin\s+salm[oó]n|sin\s+mariscos?|sin\s+carne|sin\s+jam[oó]n|sin\s+queso|sin\s+gluten|sin\s+lactosa|solo\s+crostinis?|s[oó]lo\s+crostinis?|solo\s+canap[eé]s?|unid(?:ades)?\b|unds?\b|bandejas?|bultos?|paquetes?|bolsas?)/i;
+
+// Sabores típicos de postres o cóctel que suelen aparecer como desglose de una caja
+const PATRON_SABOR_DESGLOSE = /(pie\s+de\s+lim[oó]n|lim[oó]n|maracuy[aá]|manjar|tres\s+leches|tiramis[uú]|mousse|brownies?|alfajor(?:es)?|cuchufl[ií]s?|profiterol(?:es)?|macarons?|cheesecake|suspiro|merengue|frambuesa|chocolate|l[uú]cuma|nuez|celestino|mil\s*hojas|berlines?|kuchen|tartaletas?|canastitos?\s+dulces?)/i;
+
 /**
- * Normaliza y extrae la cantidad numérica y descripción de un ítem de pedido.
+ * Calcula la cantidad de cajas/bultos físicos a partir de la línea principal de un ítem.
+ * Distingue multiplicadores de cajas ("2-canapé", "1 caja postres (30 unid)")
+ * frente a cantidades expresadas en unidades totales ("120 crostinis champiñón" -> 1 bulto).
+ */
+export function calcularCantidadBultos(primeraLinea, cantidadSugerida = null) {
+  const linea = String(primeraLinea || '').trim();
+  if (!linea) return 1;
+
+  // 1. Contenedor físico explícito al inicio: "1 caja postres (30 unid)", "2 cajas...", "3 bandejas..."
+  const matchContenedor = linea.match(/^(\d+)\s*(?:cajas?|cajitas?|bultos?|canastos?|canastitos?|tablas?|bandejas?|bolsas?|paquetes?|pks?)\b/i);
+  if (matchContenedor) {
+    return Math.max(1, parseInt(matchContenedor[1], 10) || 1);
+  }
+
+  // 2. Unidades explícitas al inicio: "120 unidades crostinis", "30 unid postres" -> 1 bulto
+  if (/^(\d+)\s*(?:unidades?|unid\.?|unds?\.?|u\.?)\b/i.test(linea)) {
+    return 1;
+  }
+
+  // 3. Prefijo multiplicador con separador explícito: "3-croissant", "2- canapé mix 3", "2x canapé"
+  const matchSeparador = linea.match(/^(\d+)\s*(?:[-–—*]|[xX]\b|\.\s*)\s*(.+)$/);
+  if (matchSeparador) {
+    const num = parseInt(matchSeparador[1], 10) || 1;
+    const resto = matchSeparador[2].trim();
+    if (/^(?:unidades?|unid\.?|unds?\.?)\b/i.test(resto) || num > 20) {
+      return 1;
+    }
+    return Math.max(1, num);
+  }
+
+  // 4. Número seguido de espacio y descripción: "120 crostinis champiñón" vs "2 croissant"
+  const matchNumeroEspacio = linea.match(/^(\d+)\s+(.+)$/);
+  if (matchNumeroEspacio) {
+    const num = parseInt(matchNumeroEspacio[1], 10) || 1;
+    const resto = matchNumeroEspacio[2].trim();
+    // Si el número es >= 15 (ej: 30, 50, 100, 120 crostinis) o menciona unidades, representa unidades totales en 1 bulto
+    if (num >= 15 || /^(?:unidades?|unid\.?|unds?\.?)\b/i.test(resto)) {
+      return 1;
+    }
+    return Math.max(1, num);
+  }
+
+  // 5. Si viene una cantidad sugerida válida y moderada (< 15), respetarla
+  const numSugerido = Number(cantidadSugerida);
+  if (Number.isInteger(numSugerido) && numSugerido >= 1 && numSugerido < 15) {
+    return numSugerido;
+  }
+
+  return 1;
+}
+
+/**
+ * Normaliza saltos de línea cuando un ítem agrupado trae sub-ítems con guiones en una sola línea
+ * (ej: "1 caja postres (30 unid): - 10 pie de limón - 10 maracuyá - 10 manjar")
+ */
+function normalizarFormatoSubItems(texto) {
+  let limpio = String(texto || '').trim();
+  if (!limpio) return '';
+
+  // Si tiene ":" seguido de "- " en la misma línea, insertar salto de línea
+  if (limpio.includes(':') && !limpio.includes('\n')) {
+    limpio = limpio
+      .replace(/:\s*[-–—•*]\s+/g, ':\n- ')
+      .replace(/\s+[-–—•*]\s+(?=\d+\s+[A-Za-zÁÉÍÓÚáéíóúÑñ])/g, '\n- ');
+  }
+
+  return limpio;
+}
+
+/**
+ * Normaliza y extrae la cantidad numérica de bultos y descripción íntegra de un ítem de pedido.
  * Soporta entradas tanto en formato string como en objeto.
  */
 export function extraerItemDetalle(item) {
@@ -70,46 +147,233 @@ export function extraerItemDetalle(item) {
   }
 
   if (typeof item === 'object') {
-    const cantidad = Number(item.cantidad) > 0 ? Number(item.cantidad) : 1;
-    let nombre = String(item.nombre || item.textoOriginal || 'Ítem').trim();
-    const textoOriginal = String(item.textoOriginal || item.nombre || '').trim();
+    const rawNombre = String(item.nombre || item.textoOriginal || 'Ítem').trim();
+    const rawOriginal = String(item.textoOriginal || item.nombre || '').trim();
 
-    const tienePrefijo = /^(\d+)\s*[-–—*xX.]/i.test(nombre) || /^\d+\s+/i.test(nombre);
-    if (!tienePrefijo && cantidad > 1) {
-      nombre = `${cantidad}x ${nombre}`;
+    // Si Gemini separó un número de unidades grandes (ej: nombre="crostinis champiñón", cantidad=120, textoOriginal="120 crostinis champiñón"),
+    // restaurar la etiqueta original íntegra sin el "120x" artificial.
+    let baseTexto = rawNombre;
+    if (rawOriginal && /^\d+\s+/.test(rawOriginal) && !/^\d+/.test(rawNombre)) {
+      baseTexto = rawOriginal;
+    }
+    // Si tiene prefijo artificial "120x ..." generado para unidades (>= 15), limpiar la "x"
+    baseTexto = baseTexto.replace(/^(\d{2,})[xX]\s+/, '$1 ');
+
+    const nombreNormalizado = normalizarFormatoSubItems(baseTexto);
+    const primeraLinea = nombreNormalizado.split(/\r?\n/)[0].trim();
+    const cantidad = calcularCantidadBultos(primeraLinea, item.cantidad);
+
+    let nombreFinal = nombreNormalizado;
+    const tienePrefijoVisible = /^(\d+)\s*[-–—*xX.]/i.test(primeraLinea) || /^\d+\s+/i.test(primeraLinea);
+    if (!tienePrefijoVisible && cantidad > 1) {
+      const lineas = nombreNormalizado.split(/\r?\n/);
+      lineas[0] = `${cantidad}x ${lineas[0]}`;
+      nombreFinal = lineas.join('\n');
     }
 
     return {
-      nombre,
+      nombre: nombreFinal,
       cantidad,
-      textoOriginal: textoOriginal || nombre
+      textoOriginal: rawOriginal || nombreFinal
     };
   }
 
-  const texto = String(item).trim();
+  const texto = normalizarFormatoSubItems(String(item).trim());
   if (!texto) {
     return { nombre: '1x Pedido', cantidad: 1, textoOriginal: '' };
   }
 
-  // Regex para prefijos de cantidad:
-  // "3-croissant", "2x canapé mix 3", "2 x canapé", "3 cajas croissant", "2- canastos dulces", "3 croissant"
-  const regexPrefijo = /^(\d+)\s*(?:[-–—*.]|[xX]\s*|(?:cajas?|unidades?|und?s?|paquetes?|pks?|bolsas?|bultos?)\s*(?:de\s+)?|\s+)\s*(.+)$/i;
-  const match = texto.match(regexPrefijo);
-
-  if (match) {
-    const cantidad = parseInt(match[1], 10) || 1;
-    return {
-      nombre: texto,
-      cantidad,
-      textoOriginal: texto
-    };
-  }
+  const primeraLinea = texto.split(/\r?\n/)[0].trim();
+  const cantidad = calcularCantidadBultos(primeraLinea);
 
   return {
     nombre: texto,
-    cantidad: 1,
+    cantidad,
     textoOriginal: texto
   };
+}
+
+/**
+ * Determina si una línea o ítem corresponde a un sub-sabor o nota dependiente del ítem anterior
+ * (ej: "- 10 pie de limón", "- 10 maracuyá", "- 10 manjar" bajo "1 caja postres (30 unid):")
+ */
+function esSubItemDe(lineaActual, itemPadreTexto) {
+  const actual = String(lineaActual || '').trim();
+  const padre = String(itemPadreTexto || '').trim();
+  if (!actual || !padre) return false;
+
+  const primeraLineaPadre = padre.split(/\r?\n/)[0].trim();
+  const padreTerminaEnDosPuntos = /:\s*$/.test(primeraLineaPadre);
+  const padreDeclaraUnidades = /\(\s*\d+\s*(?:unid(?:ades)?|unds?|u\.?)\s*\)/i.test(primeraLineaPadre);
+  const padreEsContenedorAgrupable = /(caja|cajita|canasto|canastito|tabla|mix|postres?|surtidos?|variados?|selecci[oó]n|bandeja)/i.test(primeraLineaPadre);
+
+  // Si la línea actual declara explícitamente nuevas cajas o bultos independientes (ej: "2- canapé", "1 caja..."), NO es sub-ítem
+  if (/^\d+\s*(?:[-–—*]|[xX]\b)/i.test(actual)) return false;
+  if (/^\d+\s*(?:cajas?|cajitas?|bultos?|canastos?|tablas?|bandejas?|bolsas?|paquetes?)\b/i.test(actual)) return false;
+
+  // Caso 1: Línea iniciada con viñeta o guion ("- 10 pie de limón", "• 10 maracuyá", "* 10 manjar")
+  if (/^[-–—•*·]\s+.+/.test(actual)) {
+    const sinVineta = actual.replace(/^[-–—•*·]\s+/, '').trim();
+    // Si después del guion dice "1 caja..." o "2-...", es un ítem principal con viñeta
+    if (/^\d+\s*(?:cajas?|cajitas?|bultos?|canastos?|tablas?)\b/i.test(sinVineta)) return false;
+    if (padreTerminaEnDosPuntos || padreDeclaraUnidades || padreEsContenedorAgrupable) {
+      return true;
+    }
+    // Nota aclaratoria con guion (ej: "- sin salmón", "- solo champiñón")
+    if (/^(?:sin\b|solo\b|s[oó]lo\b|nota\b|obs\b)/i.test(sinVineta)) {
+      return true;
+    }
+  }
+
+  // Caso 2: Nota entre paréntesis en la línea inmediatamente inferior (ej: "(sin salmón)")
+  if (/^\([^)]+\)$/.test(actual)) {
+    return true;
+  }
+
+  // Caso 3: El padre termina en ":" o declara "(30 unid)" y la línea actual es un sabor con cantidad de unidades (ej: "10 pie de limón", "10x maracuyá")
+  const actualSinX = actual.replace(/^(\d+)[xX]\s+/, '$1 ');
+  if ((padreTerminaEnDosPuntos || padreDeclaraUnidades) && /^\d+\s+/.test(actualSinX) && PATRON_SABOR_DESGLOSE.test(actualSinX)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Agrupa sub-ítems de sabores o especificaciones dentro de su ítem contenedor padre
+ * para evitar que una caja con sabores desglosados se divida en múltiples checkboxes.
+ */
+export function agruparSubItems(items) {
+  if (!Array.isArray(items) || items.length === 0) return [];
+
+  const resultado = [];
+
+  for (const rawItem of items) {
+    const textoItem = typeof rawItem === 'string'
+      ? rawItem.trim()
+      : String(rawItem?.textoOriginal || rawItem?.nombre || '').trim();
+
+    if (!textoItem) continue;
+
+    if (resultado.length > 0) {
+      const ultimo = resultado[resultado.length - 1];
+      if (esSubItemDe(textoItem, ultimo.nombre)) {
+        const subLineaLimpia = textoItem
+          .replace(/^(\d+)[xX]\s+/, '$1 ')
+          .replace(/^(?!([-–—•*·]|\())\s*/, '- ');
+        const nuevoTexto = `${ultimo.nombre}\n${subLineaLimpia}`;
+        resultado[resultado.length - 1] = extraerItemDetalle({
+          nombre: nuevoTexto,
+          cantidad: ultimo.cantidad,
+          textoOriginal: nuevoTexto
+        });
+        continue;
+      }
+    }
+
+    resultado.push(extraerItemDetalle(rawItem));
+  }
+
+  return resultado;
+}
+
+/**
+ * Verifica si una cadena corresponde estrictamente a una dirección física en Chile
+ */
+function esDireccionLinea(linea) {
+  const texto = String(linea || '').trim();
+  if (!texto) return false;
+
+  // Nunca clasificar como dirección una línea que comienza con viñeta de sub-ítem
+  if (/^[-–—•*·]\s+/.test(texto)) return false;
+
+  // Nunca clasificar como dirección si empieza con multiplicador de producto ("2-canapé", "1 caja...")
+  if (/^(\d+)\s*(?:[-–—*]|[xX]\b|cajas?\b|cajitas?\b|bultos?\b|canastos?\b|tablas?\b|bandejas?\b)/i.test(texto)) {
+    return false;
+  }
+
+  const comunasYCalles = /\b(calle|avenida|av\.|av\b|pasaje|psje\.?|pje\.?|camino|condominio|parcela|depto\.?|dpto\.?|departamento|block|torre|oficina|las condes|vitacura|lo barnechea|providencia|la reina|ñuñoa|santiago|maip[uú]|peñalol[eé]n|la florida|macul|san miguel|huechuraba|recoleta|independencia|colina|chicureo|pudahuel|quilicura|estaci[oó]n central|cerrillos|lo prado|quinta normal|conchal[ií]|san joaqu[ií]n|la cisterna|san bernardo|puente alto|el bosque|la granja|la pintana|lo espejo|pedro aguirre cerda|cerro navia|renca|peñaflor|talagante|buin|paine|lampa|padre hurtado)\b/i;
+
+  if (comunasYCalles.test(texto) && !PATRON_GASTRONOMICO.test(texto)) {
+    return true;
+  }
+
+  // Si menciona comuna/calle explícita y no empieza con cantidad de producto
+  if (comunasYCalles.test(texto) && !/^\d+/.test(texto)) {
+    return true;
+  }
+
+  // Patrón de nombre de calle + numeración municipal (2 a 5 dígitos), siempre que NO sea un ítem gastronómico ni empiece con número
+  if (!/^\d+/.test(texto) && !PATRON_GASTRONOMICO.test(texto) && /[A-Za-zÁÉÍÓÚáéíóúÑñ]{3,}\s+\d{2,5}\b/.test(texto)) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Determina si una línea corresponde a un producto de catering o nota de producto
+ */
+function esItemLinea(linea) {
+  const texto = String(linea || '').trim();
+  if (!texto) return false;
+
+  // Sub-ítem con guion o viñeta
+  if (/^[-–—•*·]\s+\d+/.test(texto)) return true;
+
+  // Prefijo numérico de cajas o unidades ("2-canapé", "1 caja...", "120 crostinis")
+  if (/^(\d+)\s*[-–—*xX.]/i.test(texto) && !esDireccionLinea(texto)) return true;
+  if (/^\d+\s*(?:cajas?|cajitas?|unidades?|unid\.?|und?s?|paquetes?|pks?|bolsas?|bultos?|canastos?|tablas?|bandejas?)\b/i.test(texto)) return true;
+
+  // Cualquier coincidencia con el léxico gastronómico o catálogo de Full Canapé (si no es dirección)
+  if (PATRON_GASTRONOMICO.test(texto) && !esDireccionLinea(texto)) return true;
+
+  // Cantidad numérica al inicio seguida de texto que no es dirección ni teléfono
+  if (/^\d+\s+[A-Za-zÁÉÍÓÚáéíóúÑñ]/.test(texto) && !esDireccionLinea(texto)) return true;
+
+  // Coincidencia directa con nombres del catálogo productos.json
+  if (Array.isArray(catalogoProductos)) {
+    const lower = texto.toLowerCase();
+    if (catalogoProductos.some(prod => lower.includes(prod.toLowerCase()))) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Determina si una línea es estrictamente el nombre de una persona (cliente)
+ * y NUNCA un producto de catering, dirección ni instrucción.
+ */
+function esNombrePersona(linea) {
+  const texto = String(linea || '').trim().replace(/[:,-]+$/, '').trim();
+  if (!texto || texto.length < 3 || texto.length > 55) return false;
+
+  // Jamás es nombre de persona si contiene términos gastronómicos, direcciones o números
+  if (PATRON_GASTRONOMICO.test(texto)) return false;
+  if (esItemLinea(texto) || esDireccionLinea(texto)) return false;
+  if (/\d/.test(texto)) return false;
+
+  // Excluir instrucciones operativas comunes que no son nombres de personas
+  if (/\b(conserjer[ií]a|recepci[oó]n|timbre|port[oó]n|llamar|avisar|entregar|dejar|edificio|condominio|casa|depto|departamento|sin\s+horario|sin\s+tel[eé]fono|pedido)\b/i.test(texto)) {
+    return false;
+  }
+
+  const soloLetrasYEspacios = /^[A-Za-zÁÉÍÓÚáéíóúÑñüÜ\s.'()-]+$/;
+  if (soloLetrasYEspacios.test(texto)) {
+    const palabras = texto.split(/\s+/).filter(Boolean);
+    return palabras.length >= 1 && palabras.length <= 5;
+  }
+  return false;
+}
+
+function limpiarNombrePersona(linea) {
+  return String(linea || '')
+    .trim()
+    .replace(/^(?:cliente|nombre|contacto|recibe|para)\s*[:=-]\s*/i, '')
+    .replace(/[:,-]+$/, '')
+    .trim();
 }
 
 /**
@@ -127,9 +391,9 @@ export function parsearPedidosDeterminista(textoWhatsApp) {
 
   const esInicioPedido = (linea) => {
     const patronDia = /^(lunes|martes|mi[eé]rcoles|jueves|viernes|s[aá]bado|domingo)\b/i;
-    const patronHora = /\b\d{1,2}[:.]\d{2}\s*(?:a|-|hrs|am|pm|\/)?/i;
+    const patronHora = /\b\d{1,2}[:.]\d{2}\s*(?:a|al|-|–|—|hrs|am|pm)\b/i;
     const patronPedido = /^pedido\s*#?\d+/i;
-    return patronDia.test(linea) || (patronHora.test(linea) && !linea.toLowerCase().includes('canap')) || patronPedido.test(linea);
+    return patronDia.test(linea) || (patronHora.test(linea) && !PATRON_GASTRONOMICO.test(linea)) || patronPedido.test(linea);
   };
 
   const bloques = [];
@@ -150,7 +414,7 @@ export function parsearPedidosDeterminista(textoWhatsApp) {
 
   const esTelefono = (linea) => {
     const soloDigitos = linea.replace(/\D/g, '');
-    const tieneIndicadorTel = /^(tel|fono|whatsapp|wsp|cel|\+56|569|9\d{8})/i.test(linea);
+    const tieneIndicadorTel = /\b(tel|fono|whatsapp|wsp|cel)\b|(\+56\s*9|56\s*9\d{4}|(?<!\d)9\s*\d{4}\s*\d{4})/i.test(linea);
     return ((soloDigitos.length >= 8 && soloDigitos.length <= 13 && /^(56|9|\+56)/.test(linea.replace(/\s/g, ''))) || tieneIndicadorTel);
   };
 
@@ -158,30 +422,8 @@ export function parsearPedidosDeterminista(textoWhatsApp) {
     return /^(sin\s+tel[eé]fono|no\s+tiene\s+tel[eé]fono|s\/t|sin\s+fono)\b/i.test(linea);
   };
 
-  const esItemLinea = (linea) => {
-    if (/^(\d+)\s*[-–—*xX.]/i.test(linea)) return true;
-    if (/^\d+\s*(?:cajas?|unidades?|und?s?|paquetes?|pks?|bolsas?|bultos?)\b/i.test(linea)) return true;
-    if (/(canap[eé]|croissant|brocheta|canasto|quiche|empanada|postre|tabla|bollo|dulce|crostini|bocado|churrasco|frica|picoteo|mini\s+bocado|mil\s+hojas|camar[oó]n|tapado|sandwich)/i.test(linea)) return true;
-    return false;
-  };
-
-  const esDireccionLinea = (linea) => {
-    const comunasYCalles = /(calle|avenida|av\.?|pasaje|psje\.?|condominio|depto\.?|dpto\.?|casa|las condes|vitacura|lo barnechea|providencia|la reina|ñuñoa|santiago|maip[uú]|peñalol[eé]n|la florida|macul|san miguel|huechuraba|recoleta|independencia|colina|chicureo|pudahuel|quilicura|estaci[oó]n central|cerrillos|lo prado|quinta normal|conchal[ií]|san joaqu[ií]n|la cisterna|san bernardo|puente alto)/i;
-    if (comunasYCalles.test(linea)) return true;
-    if (/[a-záéíóúñ\s]{3,}\s+\d{2,5}\b/i.test(linea)) return true;
-    return false;
-  };
-
-  const esNombrePersona = (linea) => {
-    if (esTelefono(linea) || esSinTelefono(linea) || esItemLinea(linea) || esDireccionLinea(linea) || esInicioPedido(linea)) {
-      return false;
-    }
-    const soloLetrasYEspacios = /^[A-Za-zÁÉÍÓÚáéíóúÑñüÜ\s.'-]+$/;
-    if (soloLetrasYEspacios.test(linea) && linea.length >= 3 && linea.length <= 50) {
-      const palabras = linea.split(/\s+/).filter(Boolean);
-      return palabras.length >= 1 && palabras.length <= 5;
-    }
-    return false;
+  const esComplementoDireccion = (linea) => {
+    return /^(?:depto\.?|dpto\.?|departamento|casa|torre|block|oficina|of\.?|piso|condominio|lote|parcela)\b/i.test(linea) && !PATRON_GASTRONOMICO.test(linea);
   };
 
   const pedidos = [];
@@ -208,9 +450,10 @@ export function parsearPedidosDeterminista(textoWhatsApp) {
         continue;
       }
 
-      const matchEtiquetaCliente = linea.match(/^(?:cliente|nombre|contacto)\s*[:=-]\s*(.+)$/i);
+      // 1. Etiquetas explícitas de cliente o dirección
+      const matchEtiquetaCliente = linea.match(/^(?:cliente|nombre|contacto|recibe)\s*[:=-]\s*(.+)$/i);
       if (matchEtiquetaCliente) {
-        nombreCliente = matchEtiquetaCliente[1].trim();
+        nombreCliente = limpiarNombrePersona(matchEtiquetaCliente[1]);
         continue;
       }
 
@@ -220,28 +463,67 @@ export function parsearPedidosDeterminista(textoWhatsApp) {
         continue;
       }
 
+      // 2. Si ya hay un ítem previo y esta línea es un sub-sabor o nota ("- 10 pie de limón", "(sin salmón)"), agruparlo de inmediato
+      if (itemsRaw.length > 0 && esSubItemDe(linea, itemsRaw[itemsRaw.length - 1])) {
+        const subLinea = linea.replace(/^(?!([-–—•*·]|\())\s*/, '- ');
+        itemsRaw[itemsRaw.length - 1] = `${itemsRaw[itemsRaw.length - 1]}\n${subLinea}`;
+        continue;
+      }
+
+      // 3. Detección de teléfono (incluyendo líneas mixtas "Nombre + Teléfono")
       if (esTelefono(linea)) {
         if (!telefono) {
           telefono = sanitizarTelefonoChileno(linea);
         }
+        // Verificar si en la misma línea venía el nombre del cliente junto al teléfono
+        const restoSinTel = linea
+          .replace(/(?:tel[eé]fono|tel|fono|whatsapp|wsp|cel)\s*[:=-]?\s*/gi, '')
+          .replace(/\+?\d[\d\s()-]{6,}\d/g, '')
+          .replace(/^[\s,:/-]+|[\s,:/-]+$/g, '')
+          .trim();
+
+        if (restoSinTel) {
+          if (!direccion && esDireccionLinea(restoSinTel)) {
+            direccion = restoSinTel;
+          } else if (!nombreCliente && esNombrePersona(restoSinTel)) {
+            nombreCliente = limpiarNombrePersona(restoSinTel);
+          }
+        }
         continue;
       }
 
+      // 4. Detección prioritaria de ítems gastronómicos (nunca se pierden ni se confunden con nombre o dirección)
       if (esItemLinea(linea)) {
         itemsRaw.push(linea);
         continue;
       }
 
-      if (esDireccionLinea(linea) && !direccion) {
-        direccion = linea;
+      // 5. Detección de dirección o complemento de dirección
+      if (esDireccionLinea(linea)) {
+        if (!direccion) {
+          direccion = linea;
+        } else if (esComplementoDireccion(linea)) {
+          direccion = `${direccion}, ${linea}`;
+        } else {
+          itemsRaw.push(linea);
+        }
         continue;
       }
 
-      if (esNombrePersona(linea) && !nombreCliente) {
-        nombreCliente = linea;
+      if (direccion && esComplementoDireccion(linea)) {
+        direccion = `${direccion}, ${linea}`;
         continue;
       }
 
+      // 6. Detección estricta de nombre de cliente (nunca se agrega como ítem de checklist)
+      if (esNombrePersona(linea)) {
+        if (!nombreCliente) {
+          nombreCliente = limpiarNombrePersona(linea);
+        }
+        continue;
+      }
+
+      // 7. Fallback seguro: si aún no hay dirección y no parece producto, asignar a dirección; de lo contrario preservar como ítem
       if (!direccion) {
         direccion = linea;
       } else {
@@ -249,8 +531,9 @@ export function parsearPedidosDeterminista(textoWhatsApp) {
       }
     }
 
-    const items = itemsRaw.length > 0
-      ? itemsRaw.map(it => extraerItemDetalle(it))
+    const itemsAgrupados = agruparSubItems(itemsRaw);
+    const items = itemsAgrupados.length > 0
+      ? itemsAgrupados
       : [extraerItemDetalle('1 pedido')];
 
     pedidos.push({
@@ -278,22 +561,21 @@ export async function procesarPedidos(textoWhatsApp) {
     Eres el sistema logístico de despacho rápido de "Full Canapé" en Santiago, Chile.
     Convierte el siguiente texto de WhatsApp en un objeto JSON con la lista de pedidos en el MISMO ORDEN de aparición.
 
-    REGLAS ESTRICTAS DE EXTRACCIÓN:
-    1. SEPARACIÓN: Cada pedido inicia con un Día y Rango Horario (ej: "Sábado 18. 08:00 a 09:00"), un encabezado de pedido o el nombre del cliente.
+    REGLAS ESTRICTAS DE EXTRACCIÓN (FIDELIDAD 100%):
+    1. SEPARACIÓN: Cada pedido inicia con un Día y Rango Horario (ej: "Sábado 18. 08:00 a 09:00"), un encabezado de pedido o los datos del cliente.
     2. HORARIO: El campo "cliente" debe contener exactamente el Día y la Hora (ej: "Sábado 18. 08:00 a 09:00"). Si no se especifica horario, usa "Sin horario".
-    3. NOMBRE DEL CLIENTE: Extrae el nombre de la persona o contacto (ej: "Josefina Bilbao") en el campo "nombre_cliente". Si no aparece ningún nombre de persona en el pedido, asigna cadena vacía "".
+    3. NOMBRE DEL CLIENTE (PROHIBIDO COMO ITEM): Extrae el nombre de la persona que recibe (ej: "Josefina Bilbao") exclusivamente en "nombre_cliente". JAMÁS agregues el nombre del cliente dentro del arreglo "items". Si no hay nombre de persona, usa "".
     4. DIRECCIÓN: La dirección completa (calle, número, depto, comuna). Si no aparece dirección, usa "Sin dirección".
-    5. TELÉFONO: Extrae el número de teléfono móvil chileno. Si no contiene teléfono, asigna cadena vacía "".
-    6. ITEMS: Lista de productos o bultos de la parada. Cada elemento debe ser un objeto:
-       - "nombre": descripción del producto manteniendo el prefijo numérico visible (ej: "1-Canasto", "2-canapé mix 3", "3-croissant").
-       - "cantidad": número entero con la cantidad de cajas o unidades (ej: 1, 2, 3). Si no se especifica número, asigna 1.
-       - "textoOriginal": texto original tal como aparece en la línea.
+    5. TELÉFONO: Extrae el número de teléfono móvil chileno. Si no contiene teléfono, asigna "".
+    6. ITEMS (PROHIBIDO OMITIR PRODUCTOS): Incluye TODOS los productos de catering del pedido sin excepción.
+       - Especificaciones especiales: Conserva notas como "canapé sin salmón", "solo crostinis de champiñón", etc. íntegramente dentro de "nombre".
+       - Cantidades en unidades totales: Si un ítem se indica en unidades totales (ej: "120 crostinis champiñón"), NO lo descartes ni separes el número: guarda la etiqueta completa "120 crostinis champiñón" en "nombre" y asigna "cantidad": 1 (1 bulto).
+       - Agrupación de postres y sub-sabores: Cuando un producto tenga sub-sabores listados debajo con guiones o viñetas (ej: "1 caja postres (30 unid):" seguido de "- 10 pie de limón", "- 10 maracuyá", "- 10 manjar"), agrúpalo SIEMPRE como UN SOLO elemento en "items" con "cantidad": 1 y pon el título principal y los sabores separados por saltos de línea ("\\n") dentro de "nombre". NUNCA dividas los sabores de una misma caja en ítems separados.
 
     Texto a procesar:
     ${textoWhatsApp}
   `;
 
-  // Si no hay cliente de Gemini configurado, ejecutar fallback determinista de inmediato
   if (!genAI) {
     console.warn('API Key de Gemini no detectada. Procesando con parser determinista.');
     const fallback = parsearPedidosDeterminista(textoWhatsApp);
@@ -301,7 +583,6 @@ export async function procesarPedidos(textoWhatsApp) {
   }
 
   try {
-    // Modelo preferido: gemini-3.5-flash (baja latencia y soporte nativo de structured output)
     const model = genAI.getGenerativeModel({
       model: 'gemini-3.5-flash',
       generationConfig: {
@@ -341,7 +622,8 @@ export async function procesarPedidos(textoWhatsApp) {
 }
 
 /**
- * Normaliza y sanitiza los campos de los pedidos procesados
+ * Normaliza y sanitiza los campos de los pedidos procesados.
+ * Garantiza que el nombre del cliente nunca se filtre como ítem y que los sub-sabores queden agrupados.
  */
 export function normalizarPedidos(data) {
   if (!data || !Array.isArray(data.pedidos)) {
@@ -349,12 +631,39 @@ export function normalizarPedidos(data) {
   }
 
   const pedidosNormalizados = data.pedidos.map(p => {
-    const rawItems = Array.isArray(p.items) && p.items.length > 0 ? p.items : ['1 pedido'];
-    const items = rawItems.map(it => extraerItemDetalle(it));
+    let nombreCliente = limpiarNombrePersona(p.nombre_cliente || '');
+    const rawItems = Array.isArray(p.items) && p.items.length > 0 ? p.items : [];
+
+    // Filtrar cualquier ítem que sea en realidad el nombre del cliente
+    const itemsSinCliente = [];
+    for (const rawIt of rawItems) {
+      const textoIt = typeof rawIt === 'string'
+        ? rawIt.trim()
+        : String(rawIt?.textoOriginal || rawIt?.nombre || '').trim();
+      const textoSinPrefijo = textoIt.replace(/^1[xX]\s+/i, '').trim();
+
+      if (!textoSinPrefijo) continue;
+
+      if (nombreCliente && textoSinPrefijo.toLowerCase() === nombreCliente.toLowerCase()) {
+        continue;
+      }
+
+      if (!nombreCliente && esNombrePersona(textoSinPrefijo) && rawItems.length > 1) {
+        nombreCliente = limpiarNombrePersona(textoSinPrefijo);
+        continue;
+      }
+
+      itemsSinCliente.push(rawIt);
+    }
+
+    const itemsAgrupados = agruparSubItems(itemsSinCliente);
+    const items = itemsAgrupados.length > 0
+      ? itemsAgrupados
+      : [extraerItemDetalle('1 pedido')];
 
     return {
       cliente: p.cliente || 'Sin horario',
-      nombre_cliente: (p.nombre_cliente || '').trim(),
+      nombre_cliente: nombreCliente,
       telefono: sanitizarTelefonoChileno(p.telefono || ''),
       direccion: p.direccion || 'Sin dirección',
       items
