@@ -14,6 +14,47 @@ export function dispararHaptico(duracionMs = 15) {
 }
 
 /**
+ * Reproduce un tono sutil de confirmación (120ms) mediante Web Audio API.
+ * Diseñado con envolvente exponencial ultracorta y cierre inmediato del contexto
+ * para no solicitar foco de audio multimedia ni interrumpir el Bluetooth del vehículo.
+ */
+export function reproducirTonoConfirmacion() {
+  try {
+    if (typeof window === 'undefined') return;
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+
+    const ctx = new AudioCtx();
+    const now = ctx.currentTime;
+    const duracion = 0.12; // 120ms (dentro del rango estricto de 100-150ms)
+
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+
+    osc.type = 'sine';
+    // Micro-intervalo ascendente limpio (La5 -> Mi6) para confirmación táctil
+    osc.frequency.setValueAtTime(660, now);
+    osc.frequency.exponentialRampToValueAtTime(880, now + 0.055);
+
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.08, now + 0.012);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + duracion);
+
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+
+    osc.start(now);
+    osc.stop(now + duracion);
+
+    osc.onended = () => {
+      ctx.close().catch(() => {});
+    };
+  } catch {
+    // Silencioso si el navegador bloquea la síntesis de audio
+  }
+}
+
+/**
  * Abre enlaces externos (WhatsApp, Waze, Google Maps) previniendo que la PWA
  * quede atrapada en un webview huérfano con pantalla blanca y botón 'X'.
  */
@@ -28,12 +69,8 @@ export function abrirHandoffExterno(url) {
     (typeof window !== 'undefined' && window.matchMedia?.('(display-mode: standalone)').matches);
 
   if (isStandalone) {
-    // En modo standalone, invocar directamente la URL mediante location.href.
-    // El sistema operativo transfiere el control a la aplicación nativa (WhatsApp o Maps)
-    // sin crear un Safari View Controller satélite que queda en blanco al regresar.
     window.location.href = url;
   } else {
-    // En navegadores móviles regulares, abrir con un ancla con noopener y noreferrer.
     const enlace = document.createElement('a');
     enlace.href = url;
     enlace.target = '_blank';

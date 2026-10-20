@@ -9,7 +9,7 @@ import {
   pushEsSoportado
 } from './lib/push';
 import { sanitizarTelefonoChileno, formatearTelefonoVisual } from './lib/sanitizer';
-import { abrirWhatsApp, abrirNavegacion, dispararHaptico } from './lib/handoff';
+import { abrirWhatsApp, abrirNavegacion, dispararHaptico, reproducirTonoConfirmacion } from './lib/handoff';
 import {
   ChevronLeft, ChevronRight, Package, MapPin, Loader2, CheckCircle2,
   Map, Zap, Truck, Home, Phone, MessageCircle, RefreshCcw, ListOrdered,
@@ -86,7 +86,15 @@ function BotonRayo({ presionando, onPointerDown, onPointerUp }) {
   );
 }
 
-function BotonPrincipalAccion({ modo, todoCargado, intentarComenzarRuta, esUltimaParada, todosSacadosParada, finalizarRuta, onAvanzarParada }) {
+function BotonPrincipalAccion({
+  modo,
+  todoCargado,
+  intentarComenzarRuta,
+  esUltimaParada,
+  todosSacadosParada,
+  finalizarRuta,
+  onCompletarParada
+}) {
   return (
     <div className="pt-5 border-t border-slate-200 bg-white w-full">
       {modo === 'carga' ? (
@@ -110,9 +118,9 @@ function BotonPrincipalAccion({ modo, todoCargado, intentarComenzarRuta, esUltim
       ) : (
         <button
           type="button"
-          onClick={esUltimaParada ? finalizarRuta : onAvanzarParada}
+          onClick={esUltimaParada ? finalizarRuta : onCompletarParada}
           disabled={!todosSacadosParada}
-          aria-label={esUltimaParada ? 'Terminar ruta' : 'Siguiente entrega'}
+          aria-label={esUltimaParada ? 'Terminar ruta' : 'Entregar parada y avanzar'}
           className={`
             w-full h-[68px] text-white rounded-3xl font-black text-sm sm:text-base
             active:scale-[0.97] transition-all duration-200 disabled:opacity-40
@@ -229,7 +237,7 @@ function ModalEditarParada({
         <div className="flex items-center justify-between pb-3 mb-4 border-b border-slate-200 shrink-0">
           <div>
             <p className="text-red-600 text-[11px] font-black uppercase tracking-widest flex items-center gap-1.5">
-              <Pencil size={12} /> Parada {paradaNumero}
+              <Pencil size={12} /> Parada {paradaNumero} · Check-In Cocina
             </p>
             <h3 className="text-xl sm:text-2xl font-black text-slate-900 tracking-tight">Editar Parada y Productos</h3>
           </div>
@@ -436,13 +444,19 @@ function App() {
   const [absorbiendo, setAbsorbiendo]   = useState(false);
   const [showReorder, setShowReorder]   = useState(false);
   const [resetProgress, setResetProgress] = useState(0);
+  const [restoreProgress, setRestoreProgress] = useState(0);
+
+  // --- Timestamps de Jornada y Estado de Resumen ---
+  const [inicioRutaAt, setInicioRutaAt] = useState(() => getMemoria('fc_inicio_ruta_at', null));
+  const [finRutaAt, setFinRutaAt]       = useState(() => getMemoria('fc_fin_ruta_at', null));
+  const [resumenCopiado, setResumenCopiado] = useState(false);
 
   // --- Alerta Modal Multicontrol ---
   const [alertaSinTelefono, setAlertaSinTelefono] = useState(null);
   const [modalEditId, setModalEditId] = useState(null);
   const [modalEditPhone, setModalEditPhone] = useState('');
 
-  // --- Modo Edición de Parada e Ítems ---
+  // --- Modo Edición de Parada e Ítems (Exclusivo Check-In Cocina) ---
   const [modoEdicion, setModoEdicion] = useState(false);
   const [formEdicion, setFormEdicion] = useState({
     cliente: '',
@@ -468,6 +482,7 @@ function App() {
 
   const pressTimer     = useRef(null);
   const resetTimer     = useRef(null);
+  const restoreTimer   = useRef(null);
   const syncTimeoutRef = useRef(null);
   const adminTimer     = useRef(null);
 
@@ -502,6 +517,7 @@ function App() {
     return () => {
       if (pressTimer.current) clearTimeout(pressTimer.current);
       if (resetTimer.current) clearInterval(resetTimer.current);
+      if (restoreTimer.current) clearInterval(restoreTimer.current);
       if (editTimer.current) clearInterval(editTimer.current);
       if (hideTimer.current) clearInterval(hideTimer.current);
       if (adminTimer.current) clearInterval(adminTimer.current);
@@ -517,6 +533,8 @@ function App() {
   useEffect(() => { guardarMemoria('fc_modo', modo); }, [modo]);
   useEffect(() => { guardarMemoria('fc_eta', eta); }, [eta]);
   useEffect(() => { guardarMemoria('fc_hidden_rutas', hiddenRutas); }, [hiddenRutas]);
+  useEffect(() => { guardarMemoria('fc_inicio_ruta_at', inicioRutaAt); }, [inicioRutaAt]);
+  useEffect(() => { guardarMemoria('fc_fin_ruta_at', finRutaAt); }, [finRutaAt]);
 
   // Registro del Service Worker al montar
   useEffect(() => {
@@ -549,11 +567,13 @@ function App() {
         setPresionando(false);
         setAbsorbiendo(false);
         setResetProgress(0);
+        setRestoreProgress(0);
         setEditProgress(0);
         setAdminProgress(0);
         setHideProgress({ id: null, progress: 0 });
         if (pressTimer.current) clearTimeout(pressTimer.current);
         if (resetTimer.current) clearInterval(resetTimer.current);
+        if (restoreTimer.current) clearInterval(restoreTimer.current);
         if (editTimer.current) clearInterval(editTimer.current);
         if (hideTimer.current) clearInterval(hideTimer.current);
         if (adminTimer.current) clearInterval(adminTimer.current);
@@ -760,6 +780,8 @@ function App() {
         setPedidos(nuevosPedidos);
         setIndex(0);
         setModo('carga');
+        setInicioRutaAt(null);
+        setFinRutaAt(null);
       } else {
         alert('No se encontraron pedidos válidos en el texto.');
       }
@@ -773,11 +795,35 @@ function App() {
 
   const restaurarUltima = () => {
     if (historial && historial.length > 0) {
-      dispararHaptico(20);
+      dispararHaptico(35);
       setPedidos(JSON.parse(JSON.stringify(historial)));
       setIndex(0);
       setModo('carga');
+      setInicioRutaAt(null);
+      setFinRutaAt(null);
     }
+  };
+
+  // Pulsación prolongada (~750ms) para "Restaurar última carga"
+  const startRestore = (e) => {
+    if (e?.button && e.button !== 0) return;
+    if (e?.cancelable) e.preventDefault();
+    if (restoreTimer.current) clearInterval(restoreTimer.current);
+    restoreTimer.current = setInterval(() => {
+      setRestoreProgress(prev => {
+        if (prev >= 100) {
+          clearInterval(restoreTimer.current);
+          restaurarUltima();
+          return 0;
+        }
+        return prev + 5;
+      });
+    }, 38);
+  };
+
+  const stopRestore = () => {
+    if (restoreTimer.current) clearInterval(restoreTimer.current);
+    setRestoreProgress(0);
   };
 
   const activarPush = async () => {
@@ -818,13 +864,16 @@ function App() {
   };
 
   const limpiarTodo = () => {
-    ['fc_input', 'fc_pedidos', 'fc_index', 'fc_modo', 'fc_eta'].forEach(k => localStorage.removeItem(k));
+    ['fc_input', 'fc_pedidos', 'fc_index', 'fc_modo', 'fc_eta', 'fc_inicio_ruta_at', 'fc_fin_ruta_at'].forEach(k => localStorage.removeItem(k));
     setPedidos([]);
     setInput('');
     setIndex(0);
     setModo('carga');
     setEta('');
     setModoEdicion(false);
+    setInicioRutaAt(null);
+    setFinRutaAt(null);
+    setResumenCopiado(false);
   };
 
   const moverPedido = (from, to) => {
@@ -881,7 +930,9 @@ function App() {
     }
   };
 
+  // Apertura de edición bloqueada estrictamente fuera del modo 'carga' (Check-in Cocina)
   const abrirModalEdicion = useCallback(() => {
+    if (modo !== 'carga') return;
     const actual = pedidos[index];
     if (!actual) return;
     setFormEdicion({
@@ -900,9 +951,10 @@ function App() {
     });
     setModoEdicion(true);
     dispararHaptico(25);
-  }, [pedidos, index]);
+  }, [pedidos, index, modo]);
 
   const startEditPress = (e) => {
+    if (modo !== 'carga') return;
     if (e?.button && e.button !== 0) return;
     if (e?.cancelable) e.preventDefault();
     if (editTimer.current) clearInterval(editTimer.current);
@@ -915,7 +967,7 @@ function App() {
         }
         return prev + 5;
       });
-    }, 35);
+    }, 38);
   };
 
   const stopEditPress = () => {
@@ -924,6 +976,10 @@ function App() {
   };
 
   const guardarEdicion = () => {
+    if (modo !== 'carga') {
+      setModoEdicion(false);
+      return;
+    }
     dispararHaptico(20);
     const itemsValidos = (formEdicion.items || [])
       .map(it => {
@@ -1017,7 +1073,13 @@ function App() {
   };
 
   const finalizarRuta = () => {
+    reproducirTonoConfirmacion();
     dispararHaptico(40);
+    const ahoraIso = new Date().toISOString();
+    setFinRutaAt(ahoraIso);
+    if (!inicioRutaAt) {
+      setInicioRutaAt(ahoraIso);
+    }
     const ultimaDireccion = pedidos[pedidos.length - 1]?.direccion || '';
     dispararNotificacionPush(
       `Ruta completada — ${repartidorNombre || 'Repartidor'}`,
@@ -1052,7 +1114,12 @@ function App() {
 
   const cambiarAModoReparto = () => {
     dispararHaptico(30);
+    stopEditPress();
+    setModoEdicion(false);
     const yaHabiaIniciadoEntregas = pedidos.some(p => (p.items || []).some(it => it.sacado));
+    if (!inicioRutaAt) {
+      setInicioRutaAt(new Date().toISOString());
+    }
     if (!yaHabiaIniciadoEntregas) {
       setIndex(0);
       setEta('');
@@ -1066,8 +1133,21 @@ function App() {
     setModo('reparto');
   };
 
-  const avanzar = () => {
-    dispararHaptico(20);
+  // Paginación pura de lectura (sin notificaciones push ni efectos secundarios de entrega)
+  const irAParadaAnterior = () => {
+    dispararHaptico(15);
+    setIndex(i => Math.max(0, i - 1));
+  };
+
+  const irAParadaSiguiente = () => {
+    dispararHaptico(15);
+    setIndex(i => Math.min(pedidos.length - 1, i + 1));
+  };
+
+  // Acción exclusiva de completitud de entrega de la parada actual
+  const completarParadaActual = () => {
+    reproducirTonoConfirmacion();
+    dispararHaptico(25);
     const siguiente = Math.min(pedidos.length - 1, index + 1);
     if (siguiente > index && modo === 'reparto') {
       const dirSiguiente = pedidos[siguiente]?.direccion || '';
@@ -1078,11 +1158,7 @@ function App() {
       dispararNotificacionPush(titulo, cuerpo);
     }
     setIndex(siguiente);
-  };
-
-  const retroceder = () => {
-    dispararHaptico(15);
-    setIndex(i => Math.max(0, i - 1));
+    setEta('');
   };
 
   // Handlers del Botón Rayo (Marcar Todo en la parada actual)
@@ -1107,7 +1183,9 @@ function App() {
       }));
       setPresionando(false);
       if (modo === 'reparto' && index < pedidos.length - 1) {
-        setTimeout(() => { avanzar(); setEta(''); }, 300);
+        setTimeout(() => {
+          completarParadaActual();
+        }, 300);
       }
     }, 750);
   };
@@ -1351,14 +1429,77 @@ function App() {
   }
 
   if (modo === 'fin') {
+    const totalParadas = pedidos.length;
+    const paradasEntregadas = pedidos.filter(p => (p.items || []).some(it => it.sacado)).length || totalParadas;
+    const fechaInicioObj = inicioRutaAt ? new Date(inicioRutaAt) : new Date();
+    const fechaFinObj = finRutaAt ? new Date(finRutaAt) : new Date();
+    const horaInicioStr = fechaInicioObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    const horaFinStr = fechaFinObj.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+
+    const diffMs = Math.max(0, fechaFinObj.getTime() - fechaInicioObj.getTime());
+    const totalMinutos = Math.max(1, Math.round(diffMs / 60000));
+    const horasRuta = Math.floor(totalMinutos / 60);
+    const minutosRuta = totalMinutos % 60;
+    const duracionTexto = horasRuta > 0
+      ? `${horasRuta} h ${minutosRuta} min`
+      : `${minutosRuta} min`;
+
+    const copiarResumenWhatsApp = async () => {
+      dispararHaptico(25);
+      const fechaJornada = fechaFinObj.toLocaleDateString('es-CL', {
+        weekday: 'long',
+        day: 'numeric',
+        month: 'long'
+      });
+
+      const detalleLineas = pedidos.map((p, idx) => {
+        const cajasParada = (p.items || []).reduce((s, it) => s + (Number(it.cantidad) || 1), 0);
+        const horaParada = (p.items || []).find(it => it.entrega_at)?.entrega_at || horaFinStr;
+        const clienteStr = p.nombre_cliente ? ` (${p.nombre_cliente})` : '';
+        return `• Parada ${idx + 1}: ${p.direccion}${clienteStr} — ${cajasParada} ${cajasParada === 1 ? 'caja' : 'cajas'} [${horaParada}]`;
+      }).join('\n');
+
+      const textoResumen = [
+        `✅ *CIERRE DE JORNADA — FULL CANAPÉ*`,
+        `👤 *Repartidor:* ${repartidorNombre || 'Repartidor'}`,
+        `📅 *Fecha:* ${fechaJornada}`,
+        `📍 *Paradas entregadas:* ${paradasEntregadas} / ${totalParadas}`,
+        `📦 *Total distribuido:* ${totalCajasRuta} ${totalCajasRuta === 1 ? 'caja' : 'cajas'}`,
+        `🕒 *Inicio:* ${horaInicioStr} | *Término:* ${horaFinStr}`,
+        `⏱️ *Duración total:* ${duracionTexto}`,
+        ``,
+        `*Detalle de ruta:*`,
+        detalleLineas
+      ].join('\n');
+
+      try {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+          await navigator.clipboard.writeText(textoResumen);
+        } else {
+          const area = document.createElement('textarea');
+          area.value = textoResumen;
+          area.style.position = 'fixed';
+          area.style.opacity = '0';
+          document.body.appendChild(area);
+          area.select();
+          document.execCommand('copy');
+          document.body.removeChild(area);
+        }
+        setResumenCopiado(true);
+        setTimeout(() => setResumenCopiado(false), 2600);
+      } catch {
+        alert('No se pudo copiar automáticamente. Intenta nuevamente.');
+      }
+    };
+
     return (
       <div
-        className="min-h-screen bg-slate-50 flex flex-col items-center justify-center text-slate-900 overflow-hidden relative"
+        className="min-h-screen bg-slate-50 flex flex-col items-center justify-center text-slate-900 overflow-y-auto overflow-x-hidden relative"
         style={{
-          paddingTop: 'max(2rem, env(safe-area-inset-top))',
-          paddingBottom: 'max(2rem, env(safe-area-inset-bottom))',
-          paddingLeft: 'max(2rem, env(safe-area-inset-left))',
-          paddingRight: 'max(2rem, env(safe-area-inset-right))'
+          paddingTop: 'max(1.75rem, env(safe-area-inset-top))',
+          paddingBottom: 'max(1.75rem, env(safe-area-inset-bottom))',
+          paddingLeft: 'max(1.5rem, env(safe-area-inset-left))',
+          paddingRight: 'max(1.5rem, env(safe-area-inset-right))'
         }}
       >
         {PARTICULAS_CONFETI.map((particula) => (
@@ -1375,18 +1516,65 @@ function App() {
           />
         ))}
 
-        <div className="relative z-10 flex flex-col items-center w-full max-w-sm text-center animate-pop-in">
-          <div className="bg-emerald-100 border-2 border-emerald-300 text-emerald-700 p-8 rounded-full mb-6 shadow-md">
-            <CheckCircle2 size={72} strokeWidth={2} />
+        <div className="relative z-10 flex flex-col items-center w-full max-w-md text-center animate-pop-in my-auto">
+          <div className="bg-emerald-100 border-2 border-emerald-300 text-emerald-700 p-5 rounded-full mb-4 shadow-md">
+            <CheckCircle2 size={56} strokeWidth={2.2} />
           </div>
 
-          <h1 className="text-4xl font-black mb-1 tracking-tight text-slate-900">RUTA</h1>
-          <h1 className="text-4xl font-black tracking-tight text-red-600 mb-8">COMPLETADA</h1>
+          <h1 className="text-3xl sm:text-4xl font-black mb-0.5 tracking-tight text-slate-900">RUTA</h1>
+          <h1 className="text-3xl sm:text-4xl font-black tracking-tight text-red-600 mb-5">COMPLETADA</h1>
 
-          <div className="w-full relative h-20 mb-8 flex items-center justify-center">
-            <div className="absolute bottom-5 left-0 w-full h-0 border-t-2 border-dashed border-slate-300" />
-            <div className="absolute bottom-[16px] left-0 flex items-center animate-truck-cross w-full">
-              <Truck className="text-red-600 drop-shadow-sm" size={44} strokeWidth={2} />
+          {/* Tarjeta de Resumen de Cierre de Jornada */}
+          <div className="w-full bg-white border-2 border-slate-300 rounded-3xl p-5 shadow-card mb-5 text-left">
+            <div className="flex items-center justify-between pb-3 mb-3.5 border-b border-slate-200">
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-widest text-red-600">Cierre de Jornada</p>
+                <p className="text-base font-black text-slate-900">{repartidorNombre || 'Repartidor'}</p>
+              </div>
+              <span className="bg-emerald-100 text-emerald-900 border border-emerald-300 text-[11px] font-black px-2.5 py-1 rounded-xl">
+                100% Entregado
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2.5 mb-3">
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3">
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-500">Paradas</p>
+                <p className="text-xl font-black text-slate-900 mt-0.5">{paradasEntregadas} / {totalParadas}</p>
+              </div>
+              <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3">
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-500">Total Distribuido</p>
+                <p className="text-xl font-black text-slate-900 mt-0.5">{totalCajasRuta} {totalCajasRuta === 1 ? 'caja' : 'cajas'}</p>
+              </div>
+            </div>
+
+            <div className="bg-slate-50 border border-slate-200 rounded-2xl p-3.5 flex items-center justify-between gap-2 mb-4">
+              <div>
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-500">Horario Inicio — Fin</p>
+                <p className="text-sm font-black text-slate-900 mt-0.5">{horaInicioStr} — {horaFinStr}</p>
+              </div>
+              <div className="text-right">
+                <p className="text-[10px] font-black uppercase tracking-wider text-slate-500">Duración Total</p>
+                <p className="text-sm font-black text-red-600 mt-0.5">{duracionTexto}</p>
+              </div>
+            </div>
+
+            <button
+              type="button"
+              onClick={copiarResumenWhatsApp}
+              className={`w-full h-[54px] rounded-2xl font-black text-xs sm:text-sm flex items-center justify-center gap-2 transition-all active:scale-[0.98] cursor-pointer border-2 ${
+                resumenCopiado
+                  ? 'bg-emerald-600 text-white border-emerald-700 shadow-emerald'
+                  : 'bg-amber-100 hover:bg-amber-200 text-slate-900 border-amber-400 shadow-sm'
+              }`}
+            >
+              <span>{resumenCopiado ? '✓ ¡Resumen copiado al portapapeles!' : '📋 Copiar Resumen para WhatsApp'}</span>
+            </button>
+          </div>
+
+          <div className="w-full relative h-14 mb-5 flex items-center justify-center">
+            <div className="absolute bottom-3 left-0 w-full h-0 border-t-2 border-dashed border-slate-300" />
+            <div className="absolute bottom-[10px] left-0 flex items-center animate-truck-cross w-full">
+              <Truck className="text-red-600 drop-shadow-sm" size={38} strokeWidth={2} />
             </div>
           </div>
 
@@ -1394,7 +1582,7 @@ function App() {
             <button
               type="button"
               onClick={() => abrirNavegacion('fundo el bosque 95, maipú')}
-              className="bg-emerald-600 hover:bg-emerald-700 text-white h-[66px] rounded-3xl w-full font-black text-base active:scale-[0.98] transition-all flex items-center justify-center gap-3 shadow-emerald cursor-pointer tracking-wider"
+              className="bg-emerald-600 hover:bg-emerald-700 text-white h-[64px] rounded-3xl w-full font-black text-base active:scale-[0.98] transition-all flex items-center justify-center gap-3 shadow-emerald cursor-pointer tracking-wider"
             >
               <Home size={22} /> VAMOS A CASA
             </button>
@@ -1402,7 +1590,7 @@ function App() {
             <button
               type="button"
               onClick={limpiarTodo}
-              className="bg-white border-2 border-slate-300 text-slate-800 h-[64px] rounded-3xl w-full font-black text-sm active:scale-[0.98] transition-all cursor-pointer tracking-wider hover:bg-slate-100 shadow-sm"
+              className="bg-white border-2 border-slate-300 text-slate-800 h-[60px] rounded-3xl w-full font-black text-sm active:scale-[0.98] transition-all cursor-pointer tracking-wider hover:bg-slate-100 shadow-sm"
             >
               VOLVER AL INICIO
             </button>
@@ -1498,10 +1686,27 @@ function App() {
           {historial && (
             <button
               type="button"
-              onClick={restaurarUltima}
-              className="h-[54px] rounded-3xl font-bold text-slate-800 bg-white border-2 border-slate-300 flex items-center justify-center gap-2 hover:bg-slate-50 active:scale-[0.98] transition-all shadow-sm cursor-pointer"
+              onPointerDown={startRestore}
+              onPointerUp={stopRestore}
+              onPointerLeave={stopRestore}
+              onPointerCancel={stopRestore}
+              onContextMenu={prevenirMenuContextual}
+              onDragStart={prevenirMenuContextual}
+              aria-label="Mantén presionado para restaurar última carga"
+              className="no-ios-callout relative overflow-hidden h-[54px] rounded-3xl font-bold text-slate-800 bg-white border-2 border-slate-300 flex items-center justify-center gap-2 hover:bg-slate-50 active:scale-[0.98] transition-all shadow-sm cursor-pointer select-none"
+              style={ESTILO_PULSACION_LARGA}
             >
-              <RefreshCcw size={16} /> RESTAURAR ÚLTIMA CARGA
+              <div
+                className="absolute bottom-0 left-0 h-1 bg-emerald-600 transition-all duration-75 pointer-events-none"
+                style={{ width: `${restoreProgress}%` }}
+              />
+              <RefreshCcw
+                size={16}
+                className={`pointer-events-none transition-transform ${restoreProgress > 0 ? 'animate-spin text-emerald-700' : ''}`}
+              />
+              <span className="pointer-events-none tracking-wide">
+                {restoreProgress > 0 ? 'MANTÉN PARA RESTAURAR...' : 'RESTAURAR ÚLTIMA CARGA'}
+              </span>
             </button>
           )}
 
@@ -1555,8 +1760,8 @@ function App() {
         />
       )}
 
-      {/* Modal de Edición Completa de Parada e Ítems (CRUD) */}
-      {modoEdicion && (
+      {/* Modal de Edición Completa de Parada e Ítems (Exclusivo en modo 'carga' Check-In) */}
+      {modoEdicion && modo === 'carga' && (
         <ModalEditarParada
           paradaNumero={index + 1}
           formEdicion={formEdicion}
@@ -1824,10 +2029,11 @@ function App() {
           </div>
         )}
 
+        {/* Paginación pura de lectura (sin efectos secundarios de notificación) */}
         <div className="flex items-center justify-between mb-5 bg-slate-50 p-2 rounded-2xl border border-slate-200">
           <button
             type="button"
-            onClick={retroceder}
+            onClick={irAParadaAnterior}
             disabled={index === 0}
             aria-label="Parada anterior"
             className="w-14 h-14 flex items-center justify-center bg-white text-slate-800 rounded-xl shadow-sm disabled:opacity-25 active:scale-95 transition-all cursor-pointer border-2 border-slate-200"
@@ -1842,7 +2048,7 @@ function App() {
           </div>
           <button
             type="button"
-            onClick={avanzar}
+            onClick={irAParadaSiguiente}
             disabled={index === pedidos.length - 1}
             aria-label="Parada siguiente"
             className="w-14 h-14 flex items-center justify-center bg-white text-slate-800 rounded-xl shadow-sm disabled:opacity-25 active:scale-95 transition-all cursor-pointer border-2 border-slate-200"
@@ -1862,26 +2068,29 @@ function App() {
                 <div className="flex items-center gap-2.5 mb-1">
                   <p className="text-xs font-black text-slate-500 uppercase tracking-widest">Cliente / Horario</p>
 
-                  <button
-                    type="button"
-                    onClick={abrirModalEdicion}
-                    onPointerDown={startEditPress}
-                    onPointerUp={stopEditPress}
-                    onPointerLeave={stopEditPress}
-                    onPointerCancel={stopEditPress}
-                    onContextMenu={prevenirMenuContextual}
-                    onDragStart={prevenirMenuContextual}
-                    className="no-ios-callout relative overflow-hidden bg-slate-100 px-2.5 py-1 rounded-lg text-slate-700 active:scale-90 transition-transform cursor-pointer shadow-sm border border-slate-300 hover:bg-slate-200 flex items-center gap-1 select-none"
-                    style={ESTILO_PULSACION_LARGA}
-                    aria-label="Editar parada y productos"
-                  >
-                    <div
-                      className="absolute bottom-0 left-0 h-full bg-slate-300 transition-all pointer-events-none"
-                      style={{ width: `${editProgress}%` }}
-                    />
-                    <Pencil size={11} className="relative z-10 pointer-events-none" />
-                    <span className="text-[10px] font-black uppercase tracking-wider relative z-10 pointer-events-none">Editar</span>
-                  </button>
+                  {modo === 'carga' && (
+                    <button
+                      type="button"
+                      onPointerDown={startEditPress}
+                      onPointerUp={stopEditPress}
+                      onPointerLeave={stopEditPress}
+                      onPointerCancel={stopEditPress}
+                      onContextMenu={prevenirMenuContextual}
+                      onDragStart={prevenirMenuContextual}
+                      className="no-ios-callout relative overflow-hidden bg-slate-100 px-2.5 py-1 rounded-lg text-slate-700 active:scale-90 transition-transform cursor-pointer shadow-sm border border-slate-300 hover:bg-slate-200 flex items-center gap-1 select-none"
+                      style={ESTILO_PULSACION_LARGA}
+                      aria-label="Mantén presionado para editar parada y productos"
+                    >
+                      <div
+                        className="absolute bottom-0 left-0 h-full bg-slate-300 transition-all pointer-events-none"
+                        style={{ width: `${editProgress}%` }}
+                      />
+                      <Pencil size={11} className="relative z-10 pointer-events-none" />
+                      <span className="text-[10px] font-black uppercase tracking-wider relative z-10 pointer-events-none">
+                        {editProgress > 0 ? 'Mantén...' : 'Editar'}
+                      </span>
+                    </button>
+                  )}
                 </div>
 
                 <h2 className="text-2xl sm:text-3xl font-black text-slate-900 leading-tight tracking-tight break-words">
@@ -2004,23 +2213,24 @@ function App() {
                     </div>
                   )}
 
-                  {/* Fila 3: Llamada Directa y Aviso Admin */}
+                  {/* Fila 3: Llamada Directa y Aviso Admin (centrado simétrico estricto) */}
                   <div className="flex gap-2">
                     {pedidoActual?.telefono && (
                       <button
                         type="button"
                         onClick={llamarCliente}
-                        className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-black py-3 rounded-xl text-xs active:scale-[0.97] transition-all cursor-pointer tracking-wider flex items-center justify-center gap-1.5 shadow-sm"
+                        className="flex-1 bg-blue-600 hover:bg-blue-700 text-white font-black py-3 px-4 rounded-xl text-xs active:scale-[0.97] transition-all cursor-pointer tracking-wider flex items-center justify-center gap-2 shadow-sm text-center"
                       >
-                        <PhoneCall size={14} /> LLAMAR DIRECTO
+                        <PhoneCall size={15} className="shrink-0" />
+                        <span>LLAMAR DIRECTO</span>
                       </button>
                     )}
                     <button
                       type="button"
                       onClick={avisarAdmin}
-                      className="flex-1 bg-slate-200 hover:bg-slate-300 text-slate-800 font-black py-3 rounded-xl text-xs border border-slate-300 active:scale-[0.97] transition-all cursor-pointer tracking-wider shadow-sm text-center"
+                      className="flex-1 bg-slate-200 hover:bg-slate-300 text-slate-800 font-black py-3 px-4 rounded-xl text-xs border border-slate-300 active:scale-[0.97] transition-all cursor-pointer tracking-wider shadow-sm flex items-center justify-center text-center"
                     >
-                      INFORMAR ADMIN
+                      <span>INFORMAR ADMIN</span>
                     </button>
                   </div>
                 </div>
@@ -2035,7 +2245,7 @@ function App() {
                 esUltimaParada={index === pedidos.length - 1}
                 todosSacadosParada={todosSacadosParada}
                 finalizarRuta={finalizarRuta}
-                onAvanzarParada={() => { avanzar(); setEta(''); }}
+                onCompletarParada={completarParadaActual}
               />
             </div>
           </div>
@@ -2061,13 +2271,30 @@ function App() {
                   {modo === 'carga' ? 'Verificar en cocina:' : 'Entregar estos ítems:'}
                 </h3>
               </div>
-              <button
-                type="button"
-                onClick={abrirModalEdicion}
-                className="text-[11px] font-black text-slate-600 hover:text-red-600 flex items-center gap-1 cursor-pointer transition-colors"
-              >
-                <Plus size={13} /> Editar / Agregar
-              </button>
+
+              {modo === 'carga' && (
+                <button
+                  type="button"
+                  onPointerDown={startEditPress}
+                  onPointerUp={stopEditPress}
+                  onPointerLeave={stopEditPress}
+                  onPointerCancel={stopEditPress}
+                  onContextMenu={prevenirMenuContextual}
+                  onDragStart={prevenirMenuContextual}
+                  style={ESTILO_PULSACION_LARGA}
+                  aria-label="Mantén presionado para editar o agregar productos"
+                  className="no-ios-callout relative overflow-hidden bg-slate-100 border border-slate-300 hover:bg-slate-200 px-2.5 py-1 rounded-lg text-[11px] font-black text-slate-700 flex items-center gap-1 cursor-pointer transition-all active:scale-95 select-none shadow-sm"
+                >
+                  <div
+                    className="absolute bottom-0 left-0 h-full bg-slate-300 transition-all pointer-events-none"
+                    style={{ width: `${editProgress}%` }}
+                  />
+                  <Plus size={13} className="relative z-10 pointer-events-none text-red-600" />
+                  <span className="relative z-10 pointer-events-none">
+                    {editProgress > 0 ? 'Mantén...' : 'Editar / Agregar'}
+                  </span>
+                </button>
+              )}
             </div>
 
             <div className="flex flex-col space-y-2.5 pb-4">
@@ -2168,7 +2395,7 @@ function App() {
                 esUltimaParada={index === pedidos.length - 1}
                 todosSacadosParada={todosSacadosParada}
                 finalizarRuta={finalizarRuta}
-                onAvanzarParada={() => { avanzar(); setEta(''); }}
+                onCompletarParada={completarParadaActual}
               />
             </div>
           </div>

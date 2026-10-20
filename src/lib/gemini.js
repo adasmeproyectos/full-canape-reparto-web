@@ -548,9 +548,15 @@ export function parsearPedidosDeterminista(textoWhatsApp) {
   return { pedidos };
 }
 
+// Jerarquía secuencial de modelos para ingesta de ruta (Tier 1: Pro -> Tier 2: Flash -> Tier 3: Determinista)
+const MODELOS_CASCADA_GEMINI = ['gemini-2.5-pro', 'gemini-3.5-flash'];
+
 /**
- * Procesa el texto de WhatsApp utilizando Gemini con Structured Outputs nativos.
- * Implementa timeout de 11 segundos y fallback determinista instantáneo.
+ * Procesa el texto de WhatsApp mediante una arquitectura en cascada secuencial:
+ * - Tier 1 (Primario): `gemini-2.5-pro` con salida JSON estructurada para máxima comprensión semántica.
+ * - Tier 2 (Secundario): `gemini-3.5-flash` si el modelo Pro retorna error de API o no está disponible.
+ * - Tier 3 (Respaldo Local): `parsearPedidosDeterminista` basado en expresiones regulares si fallan ambos niveles remotos.
+ * Se ejecuta de forma estrictamente secuencial ante errores explícitos, sin timeouts prematuros ni llamadas concurrentes.
  */
 export async function procesarPedidos(textoWhatsApp) {
   if (!textoWhatsApp || typeof textoWhatsApp !== 'string') {
@@ -577,48 +583,41 @@ export async function procesarPedidos(textoWhatsApp) {
   `;
 
   if (!genAI) {
-    console.warn('API Key de Gemini no detectada. Procesando con parser determinista.');
+    console.warn('API Key de Gemini no detectada. Ejecutando Nivel 3 (parser determinista local).');
     const fallback = parsearPedidosDeterminista(textoWhatsApp);
     return normalizarPedidos(fallback);
   }
 
-  try {
-    const model = genAI.getGenerativeModel({
-      model: 'gemini-3.5-flash',
-      generationConfig: {
-        responseMimeType: 'application/json',
-        responseSchema: schemaPedidos,
-        temperature: 0.1
-      }
-    });
-
-    let timeoutId;
-    const timeoutPromise = new Promise((_, reject) => {
-      timeoutId = setTimeout(() => reject(new Error('TIMEOUT_GEMINI')), 11000);
-    });
-
-    let result;
+  for (let i = 0; i < MODELOS_CASCADA_GEMINI.length; i++) {
+    const nombreModelo = MODELOS_CASCADA_GEMINI[i];
     try {
-      const aiPromise = model.generateContent(prompt);
-      result = await Promise.race([aiPromise, timeoutPromise]);
-    } finally {
-      clearTimeout(timeoutId);
+      const model = genAI.getGenerativeModel({
+        model: nombreModelo,
+        generationConfig: {
+          responseMimeType: 'application/json',
+          responseSchema: schemaPedidos,
+          temperature: 0.1
+        }
+      });
+
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      const jsonTexto = response.text();
+      const parsedData = JSON.parse(jsonTexto);
+
+      if (parsedData?.pedidos && Array.isArray(parsedData.pedidos) && parsedData.pedidos.length > 0) {
+        return normalizarPedidos(parsedData);
+      }
+
+      throw new Error(`RESPUESTA_VACIA_${nombreModelo}`);
+    } catch (error) {
+      console.warn(`Nivel ${i + 1} (${nombreModelo}) no disponible o con error (${error.message}). Avanzando al siguiente nivel de ingesta.`);
     }
-
-    const response = await result.response;
-    const jsonTexto = response.text();
-    const parsedData = JSON.parse(jsonTexto);
-
-    if (parsedData?.pedidos && Array.isArray(parsedData.pedidos) && parsedData.pedidos.length > 0) {
-      return normalizarPedidos(parsedData);
-    }
-
-    throw new Error('RESPUESTA_VACIA_GEMINI');
-  } catch (error) {
-    console.warn('Fallo en procesamiento con Gemini AI (' + error.message + '). Ejecutando parser determinista de respaldo.');
-    const fallback = parsearPedidosDeterminista(textoWhatsApp);
-    return normalizarPedidos(fallback);
   }
+
+  console.warn('Todos los niveles remotos de Gemini fallaron. Ejecutando Nivel 3 (parser determinista local).');
+  const fallback = parsearPedidosDeterminista(textoWhatsApp);
+  return normalizarPedidos(fallback);
 }
 
 /**
